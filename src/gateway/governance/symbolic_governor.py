@@ -1530,7 +1530,7 @@ class SymbolicGovernor:
                     policy_decision = policy_resp
                 else:
                     policy_decision = "DENY"
-                if policy_decision == "DENY":
+                if policy_decision in ("DENY", "GOVERNANCE_VIOLATION"):
                     _opa_meta = ControlRegistry().get_mapping(
                         GovernanceControl.OPA_POLICY_ENFORCEMENT
                     )
@@ -1576,7 +1576,7 @@ class SymbolicGovernor:
                     policy_decision = policy_resp
                 else:
                     policy_decision = "DENY"
-                if policy_decision == "DENY":
+                if policy_decision in ("DENY", "GOVERNANCE_VIOLATION"):
                     _opa_meta = ControlRegistry().get_mapping(
                         GovernanceControl.OPA_POLICY_ENFORCEMENT
                     )
@@ -2041,7 +2041,7 @@ class SymbolicGovernor:
                     policy_decision = policy_resp
                 else:
                     policy_decision = "DENY"
-                if policy_decision == "DENY":
+                if policy_decision in ("DENY", "GOVERNANCE_VIOLATION"):
                     _opa_meta = ControlRegistry().get_mapping(
                         GovernanceControl.OPA_POLICY_ENFORCEMENT
                     )
