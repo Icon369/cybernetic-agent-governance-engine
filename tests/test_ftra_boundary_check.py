@@ -35,6 +35,12 @@ from src.gateway.governance.ftra.models import (
     FtraBoundaryResult,
     TerminalClassification,
 )
+from src.gateway.governance.ftra.semantic_validator import (
+    ACTION_SCHEMAS,
+    ActionSchema,
+    ParameterConstraint,
+    register_action_schema,
+)
 
 # ---------------------------------------------------------------------------
 # FtraBoundaryResult Unit Tests
@@ -114,6 +120,43 @@ class TestFtraBoundaryResult:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def register_test_schemas_boundary():
+    """Register test schemas for boundary check tests."""
+    ACTION_SCHEMAS.clear()
+    
+    # Register minimal schema for execute_trade
+    register_action_schema(
+        "execute_trade",
+        ActionSchema(
+            action_name="execute_trade",
+            parameters=(
+                ParameterConstraint(
+                    name="symbol",
+                    required=True,
+                    param_type=str,
+                ),
+                ParameterConstraint(
+                    name="amount",
+                    required=True,
+                    param_type=(int, float),
+                    min_value=0.01,
+                ),
+                ParameterConstraint(
+                    name="currency",
+                    required=True,
+                    param_type=str,
+                ),
+            ),
+            allow_extra_parameters=True,
+        ),
+    )
+    
+    yield
+    
+    ACTION_SCHEMAS.clear()
+
+
 @pytest.fixture
 def mock_opa_client() -> MagicMock:
     """Create a mock OPA client that returns ALLOW."""
@@ -166,10 +209,10 @@ async def test_boundary_check_runs_unconditionally(
     The boundary check is now unconditional — it runs for every action to
     ensure irreversible actions are caught regardless of entry point.
     """
-    # Run checks for an irreversible action
+    # Run checks for an irreversible action with complete valid payload
     result = await symbolic_governor._run_checks(
         tool_name="execute_trade",
-        params={"amount": 100, "symbol": "AAPL", "confidence": 0.99},
+        params={"amount": 100, "symbol": "AAPL", "currency": "USD", "confidence": 0.99},
         sim_mode=False,
     )
 
@@ -194,10 +237,10 @@ class TestBoundaryCheckClassifiesDirectHttpBypass:
         execute_trade comes in via /validate-action or ext_authz, the boundary
         check should classify it as IRREVERSIBLE_TERMINAL and require HITL.
         """
-        # Test execute_trade — should be caught as IRREVERSIBLE_TERMINAL
+        # Test execute_trade with complete valid payload
         result = await symbolic_governor._ftra_boundary_check(
             tool_name="execute_trade",
-            tool_input={"amount": 50000, "symbol": "TSLA"},
+            tool_input={"amount": 50000, "symbol": "TSLA", "currency": "USD"},
             detect_bypass=True,
         )
 
@@ -370,6 +413,98 @@ class TestClassifierStandaloneInstantiation:
         assert classifier.is_irreversible("execute_trade") is True
         assert classifier.is_irreversible("write_db") is True
         assert classifier.is_irreversible("prompt_injection_check") is False
+
+
+class TestFtraBoundaryCheckInputValidation:
+    """Test fail-closed validation of tool_input parameter."""
+
+    @pytest.mark.asyncio
+    async def test_ftra_boundary_check_rejects_none_input(
+        self,
+        symbolic_governor: SymbolicGovernor,
+    ) -> None:
+        """Verify _ftra_boundary_check raises TypeError when tool_input is None."""
+        with pytest.raises(TypeError) as exc_info:
+            await symbolic_governor._ftra_boundary_check(
+                tool_name="execute_trade",
+                tool_input=None,  # type: ignore[arg-type]
+                detect_bypass=True,
+            )
+
+        assert "FTRA boundary invariant violation" in str(exc_info.value)
+        assert "'tool_input' must be a dict" in str(exc_info.value)
+        assert "NoneType" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_ftra_boundary_check_rejects_string_input(
+        self,
+        symbolic_governor: SymbolicGovernor,
+    ) -> None:
+        """Verify _ftra_boundary_check raises TypeError when tool_input is a string."""
+        with pytest.raises(TypeError) as exc_info:
+            await symbolic_governor._ftra_boundary_check(
+                tool_name="execute_trade",
+                tool_input="invalid_string",  # type: ignore[arg-type]
+                detect_bypass=True,
+            )
+
+        assert "FTRA boundary invariant violation" in str(exc_info.value)
+        assert "'tool_input' must be a dict" in str(exc_info.value)
+        assert "str" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_ftra_boundary_check_rejects_list_input(
+        self,
+        symbolic_governor: SymbolicGovernor,
+    ) -> None:
+        """Verify _ftra_boundary_check raises TypeError when tool_input is a list."""
+        with pytest.raises(TypeError) as exc_info:
+            await symbolic_governor._ftra_boundary_check(
+                tool_name="execute_trade",
+                tool_input=[{"amount": 100}],  # type: ignore[arg-type]
+                detect_bypass=True,
+            )
+
+        assert "FTRA boundary invariant violation" in str(exc_info.value)
+        assert "'tool_input' must be a dict" in str(exc_info.value)
+        assert "list" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_ftra_boundary_check_accepts_valid_dict(
+        self,
+        symbolic_governor: SymbolicGovernor,
+    ) -> None:
+        """Verify _ftra_boundary_check accepts valid dict input with complete payload."""
+        # Should not raise — valid dict input with all required parameters
+        result = await symbolic_governor._ftra_boundary_check(
+            tool_name="execute_trade",
+            tool_input={"amount": 100, "symbol": "AAPL", "currency": "USD"},
+            detect_bypass=True,
+        )
+
+        assert result.classification == "IRREVERSIBLE_TERMINAL"
+        assert result.requires_hitl is True
+
+    @pytest.mark.asyncio
+    async def test_ftra_boundary_check_accepts_empty_dict(
+        self,
+        symbolic_governor: SymbolicGovernor,
+    ) -> None:
+        """Verify _ftra_boundary_check fails on empty dict for actions with required params.
+        
+        v2.1 semantic validation: empty dict triggers semantic validation failure
+        for actions with required parameters like execute_trade.
+        """
+        # Empty dict triggers semantic validation failure for execute_trade
+        result = await symbolic_governor._ftra_boundary_check(
+            tool_name="execute_trade",
+            tool_input={},
+            detect_bypass=True,
+        )
+
+        # v2.1: Semantic breach for missing required parameters
+        assert "SEMANTIC_BREACH" in result.classification
+        assert result.requires_hitl is True
 
 
 pytestmark = [pytest.mark.unit, pytest.mark.local]

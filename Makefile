@@ -23,6 +23,8 @@ NAMESPACE ?= cage
         deploy-kill \
         verify-deploy \
         poam-drift-check \
+        lint \
+        security \
         test \
         test-fast \
         test-last-failed \
@@ -100,6 +102,33 @@ verify-deploy: ## Verify GKE deployment matches latest build and all Secrets are
 	./scripts/verify_deploy.sh
 
 # ---------------------------------------------------------------------------
+# Linting and Security
+# ---------------------------------------------------------------------------
+
+## Run linters and lockfile validation
+lint:
+	@echo "==> Running ruff linter..."
+	@uv run ruff check src/ scripts/ tests/
+	@echo "==> Validating dependency lockfile..."
+	@uv lock --check
+	@echo "✅ Lint checks passed."
+
+## Run security scanning (lockfile check, Bandit SAST, pip-audit CVEs, Semgrep)
+security:
+	@echo "==> Validating dependency lockfile..."
+	@uv lock --check
+	@echo ""
+	@echo "==> Running Bandit SAST scanner..."
+	@uv run --with bandit bandit -r src/ scripts/ -c pyproject.toml -ll -ii
+	@echo ""
+	@echo "==> Running pip-audit for CVE scanning..."
+	@uv run pip-audit
+	@echo ""
+	@echo "==> Running Semgrep static analysis..."
+	@uv run --with semgrep semgrep scan --config=auto --error src/
+	@echo "✅ Security scans completed."
+
+# ---------------------------------------------------------------------------
 # Testing
 # ---------------------------------------------------------------------------
 
@@ -137,6 +166,11 @@ test-r22:
 test-cybernetic-loop:
 	@echo "==> Running cybernetic loop regression tests..."
 	@uv run pytest tests/test_cybernetic_loop.py -v --tb=short
+
+## Run JCS property-based invariant tests (canonical serialization fuzzing)
+test-property:
+	@echo "==> Running JCS property-based invariant tests..."
+	@uv run pytest tests/test_jcs_property_invariants.py -v
 
 # ---------------------------------------------------------------------------
 # TLA+ model checking (formal verification)
