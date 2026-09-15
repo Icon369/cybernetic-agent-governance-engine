@@ -149,47 +149,100 @@ class TestValidateClearance:
 class TestBuildEnvelopeDict:
     """Tests for envelope dictionary construction."""
 
-    def test_includes_core_fields(self, valid_clearance):
-        """Envelope includes all required core fields."""
+    def test_archytan_vector_3_structure(self, valid_clearance):
+        """Envelope emits canonical Archytan ArbiterKernel wire structure."""
         envelope = build_envelope_dict(valid_clearance)
 
-        assert envelope["version"] == "actuator_01.envelope/v1"
+        # Verify envelope_version
+        assert envelope["envelope_version"] == "archytan.envelope/v1"
+
+        # Verify top-level fields
         assert envelope["correlation_id"] == valid_clearance.correlation_id
         assert envelope["issued_at"] == valid_clearance.issued_at
         assert envelope["ttl_seconds"] == valid_clearance.ttl_seconds
         assert envelope["nonce"] == valid_clearance.nonce
-        assert envelope["operator_urn"] == valid_clearance.operator_urn
         assert envelope["action"] == valid_clearance.action
-        assert envelope["target"] == valid_clearance.target
-        assert envelope["decision"] == valid_clearance.decision
-        assert envelope["decision_path"] == valid_clearance.decision_path
+        assert envelope["operator_urn"] == valid_clearance.operator_urn
 
-    def test_includes_governance_block(self, valid_clearance):
-        """Envelope includes governance block with digests."""
+        # Verify authority_ref block
+        assert "authority_ref" in envelope
+        assert "graph_hash" in envelope["authority_ref"]
+        assert "graph_version" in envelope["authority_ref"]
+
+        # Verify target structure (account_hash only)
+        assert "target" in envelope
+        assert "account_hash" in envelope["target"]
+
+        # Verify parameters at root level
+        assert "parameters" in envelope
+        assert isinstance(envelope["parameters"], dict)
+
+    def test_governance_block_v3_structure(self, valid_clearance):
+        """Governance block includes decision, decision_path, policy_version, receipt fields."""
         envelope = build_envelope_dict(valid_clearance)
 
         assert "governance" in envelope
         gov = envelope["governance"]
-        assert gov["decision_digest"] == valid_clearance.governance_decision_digest
-        assert gov["opa_input_digest"] == valid_clearance.opa_input_digest
+        assert gov["decision"] == valid_clearance.decision
+        assert gov["decision_path"] == valid_clearance.decision_path
         assert gov["required_quorum"] == valid_clearance.required_quorum
+        assert "policy_version" in gov
+        assert "decision_signature" in gov  # May be None if no policy signer
+        assert "receipt_id" in gov
+        assert "receipt_hash" in gov
+        assert "evaluated_at" in gov
 
-    def test_includes_authority_ref_placeholder(self, valid_clearance):
-        """Envelope includes authority_ref (configured at runtime)."""
+    def test_approval_block_with_webauthn_fields(self, valid_clearance):
+        """Approval block maps WebAuthn fields from clearance.approvals."""
+        # Add WebAuthn fields to first approval
+        valid_clearance.approvals[0]["credential_id"] = "test-credential-123"
+        valid_clearance.approvals[0]["client_data_json"] = (
+            "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0"
+        )
+        valid_clearance.approvals[0]["authenticator_data"] = (
+            "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA"
+        )
+        valid_clearance.approvals[0]["signature"] = "MEUCIQDvHVRm..."
+        valid_clearance.approvals[0]["challenge_binding"] = "a" * 64
+
         envelope = build_envelope_dict(valid_clearance)
 
-        assert "authority_ref" in envelope
-        assert "graph_version" in envelope["authority_ref"]
-        assert "graph_hash" in envelope["authority_ref"]
+        assert "approval" in envelope
+        approval = envelope["approval"]
+        assert approval["approver_urn"] == valid_clearance.approvals[0]["approver_urn"]
+        assert approval["credential_id"] == "test-credential-123"
+        assert approval["client_data_json"] == "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0"
+        assert (
+            approval["authenticator_data"]
+            == "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA"
+        )
+        assert approval["signature"] == "MEUCIQDvHVRm..."
+        assert approval["challenge_binding"] == "a" * 64
 
-    def test_parameters_digest_only(self, valid_clearance):
-        """Parameters block contains digests/metrics only, never full content."""
+    def test_approval_key_omitted_when_no_approvals(self, valid_clearance):
+        """DIRECT path omits approval key entirely (not null) when clearance.approvals is empty."""
+        # DIRECT path: empty approvals list, quorum=0
+        valid_clearance.approvals = []
+        valid_clearance.required_quorum = 0
+
         envelope = build_envelope_dict(valid_clearance)
 
-        assert "parameters" in envelope
-        params = envelope["parameters"]
-        assert params["semantic_distance"] == valid_clearance.semantic_distance
-        assert params["confidence_score"] == valid_clearance.confidence_score
+        # Per Vector 1: DIRECT path does NOT include "approval" key at all
+        assert "approval" not in envelope
+
+    def test_parameters_from_params_field(self, valid_clearance):
+        """Parameters are populated at root level from clearance.params."""
+        valid_clearance.params = {"amount_minor": 12345, "currency": "USD"}
+        envelope = build_envelope_dict(valid_clearance)
+
+        assert envelope["parameters"] == {"amount_minor": 12345, "currency": "USD"}
+
+    def test_parameters_empty_dict_when_params_none(self, valid_clearance):
+        """Parameters default to empty dict when params is not a dict."""
+        valid_clearance.params = None
+        envelope = build_envelope_dict(valid_clearance)
+
+        assert envelope["parameters"] == {}
 
     def test_validates_before_building(self, valid_clearance):
         """build_envelope_dict validates clearance first."""
@@ -221,12 +274,12 @@ class TestCanonicalization:
         envelope = build_envelope_dict(valid_clearance)
         canonical = canonicalize_envelope(envelope)
 
-        # Verify keys are in sorted order by checking action comes before decision
-        # (alphabetically "action" < "decision")
+        # Verify keys are in sorted order by checking correlation_id comes before envelope_version
+        # (alphabetically "correlation_id" < "envelope_version")
         decoded = canonical.decode("utf-8")
-        action_pos = decoded.find('"action"')
-        decision_pos = decoded.find('"decision"')
-        assert action_pos < decision_pos
+        correlation_pos = decoded.find('"correlation_id"')
+        envelope_version_pos = decoded.find('"envelope_version"')
+        assert correlation_pos < envelope_version_pos
 
     def test_no_insignificant_whitespace(self, valid_clearance):
         """Canonical output has no insignificant whitespace."""
@@ -443,8 +496,10 @@ class TestVectorParity:
             correlation_id_source="INGRESS_MINTED",
             governance_decision_digest="e" * 64,
             opa_input_digest="f" * 64,
-            semantic_distance=100.50,  # Should canonicalize to 100.5
-            confidence_score=5.0,  # Should canonicalize to 5
+            params={
+                "amount": 100.50,
+                "multiplier": 5.0,
+            },  # Test float canonicalization in params
             approvals=[
                 {
                     "approver_urn": "urn:actuator_01:op:op-a",
@@ -466,12 +521,12 @@ class TestVectorParity:
 
         canonical_bytes, _ = build_and_canonicalize(clearance)
 
-        # Verify float normalization per RFC 8785
+        # Verify float normalization per RFC 8785 in target.parameters
         decoded = canonical_bytes.decode("utf-8")
         # 5.0 should appear as 5, not 5.0
-        assert '"confidence_score":5' in decoded or '"confidence_score": 5' in decoded
+        assert '"multiplier":5' in decoded
         # 100.50 should appear as 100.5
-        assert "100.5" in decoded
+        assert '"amount":100.5' in decoded
 
 
 class TestInvariantEnforcement:
@@ -498,3 +553,217 @@ class TestInvariantEnforcement:
 
         with pytest.raises(InvalidClearanceError, match="requires 2"):
             build_and_canonicalize(valid_clearance)
+
+
+class TestPolicyDecisionSignature:
+    """Tests for policy decision signature generation (Phase 3)."""
+
+    def test_decision_signature_with_policy_signer(self, valid_clearance):
+        """Envelope includes decision_signature when policy_signer is provided."""
+        from unittest.mock import Mock
+
+        from src.integrations.actuator_01.signatures import (
+            ACTUATOR_01_DOMAIN_TAG_POLICY_DECISION,
+        )
+
+        # Create mock policy signer
+        mock_signer = Mock()
+        mock_signer.is_kms_active = True
+        mock_signer.signer_urn = "urn:actuator_01:policy:institutional"
+        mock_signer.sign_raw.return_value = b"x" * 64  # 64-byte signature
+
+        envelope = build_envelope_dict(valid_clearance, policy_signer=mock_signer)
+
+        # Verify decision_signature is present and not None
+        assert envelope["governance"]["decision_signature"] is not None
+        assert len(envelope["governance"]["decision_signature"]) == 128  # hex string
+
+    def test_decision_signature_none_without_policy_signer(self, valid_clearance):
+        """Envelope has decision_signature=None when no policy_signer provided."""
+        envelope = build_envelope_dict(valid_clearance, policy_signer=None)
+
+        assert envelope["governance"]["decision_signature"] is None
+
+    def test_decision_binding_format(self, valid_clearance):
+        """Verify decision binding payload uses 0x1F unit separators."""
+        import hashlib
+        from unittest.mock import Mock
+
+        # Create mock policy signer
+        mock_signer = Mock()
+        mock_signer.is_kms_active = True
+        mock_signer.signer_urn = "urn:actuator_01:policy:institutional"
+        mock_signer.sign_raw.return_value = b"x" * 64
+
+        # Build envelope to trigger policy signature generation
+        build_envelope_dict(valid_clearance, policy_signer=mock_signer)
+
+        # Verify sign_raw was called
+        assert mock_signer.sign_raw.called
+
+        # Extract the message that was signed
+        signed_message = mock_signer.sign_raw.call_args[0][0]
+
+        # Verify it starts with the domain tag
+        from src.integrations.actuator_01.signatures import (
+            ACTUATOR_01_DOMAIN_TAG_POLICY_DECISION,
+        )
+
+        assert signed_message.startswith(ACTUATOR_01_DOMAIN_TAG_POLICY_DECISION)
+
+        # Verify the remainder is a SHA-256 digest (32 bytes)
+        decision_binding_digest = signed_message[
+            len(ACTUATOR_01_DOMAIN_TAG_POLICY_DECISION) :
+        ]
+        assert len(decision_binding_digest) == 32  # SHA-256 output
+
+    def test_policy_signer_isolation_guard(self):
+        """Policy decision signatures reject operator quorum keys."""
+        from unittest.mock import Mock
+
+        from src.integrations.actuator_01.signatures import sign_policy_decision
+
+        # Create mock operator signer (URN contains ":op:")
+        mock_operator_signer = Mock()
+        mock_operator_signer.is_kms_active = True
+        mock_operator_signer.signer_urn = "urn:actuator_01:op:operator-a"
+
+        with pytest.raises(
+            ValueError,
+            match="operator quorum key.*Policy authority keys must be isolated",
+        ):
+            sign_policy_decision(
+                signer=mock_operator_signer,
+                action="payment.wire.execute",
+                target_digest="a" * 64,
+                correlation_id="550e8400-e29b-41d4-a716-446655440000",
+                decision="ALLOW",
+                decision_path="DIRECT",
+                required_quorum=2,
+                policy_version="v1",
+                evaluated_at=1785012000,
+            )
+
+    def test_decision_signature_graceful_degradation(self, valid_clearance):
+        """Envelope construction continues if policy signature fails."""
+        from unittest.mock import Mock
+
+        # Create mock policy signer that raises an error
+        mock_signer = Mock()
+        mock_signer.is_kms_active = True
+        mock_signer.signer_urn = "urn:actuator_01:policy:institutional"
+        mock_signer.sign_raw.side_effect = RuntimeError("KMS unavailable")
+
+        # Should not raise - envelope construction continues
+        envelope = build_envelope_dict(valid_clearance, policy_signer=mock_signer)
+
+        # decision_signature should be None (graceful degradation)
+        assert envelope["governance"]["decision_signature"] is None
+
+
+class TestVector1Golden:
+    """
+    Archytan Vector 1 (DIRECT path) golden fixture test.
+
+    Validates byte-exact canonicalization parity with the Archytan ArbiterKernel
+    reference implementation.
+    """
+
+    def test_vector_1_canonical_golden(self):
+        """Verify Vector 1 byte-exact canonicalization and SHA-256 golden hash."""
+        import json
+
+        # Load the golden fixture directly
+        v1 = json.load(open("tests/fixtures/actuator_01/vector1_direct.json"))
+
+        # Canonicalize
+        from src.gateway.governance.jcs_canonicalizer import jcs_canonicalize_plan
+
+        canonical_bytes = jcs_canonicalize_plan(v1)
+        digest = hashlib.sha256(canonical_bytes).hexdigest()
+
+        # Golden targets from Archytan ArbiterKernel
+        expected_length = 958
+        expected_hash = (
+            "83398b88482ae07f5ef11a95f7a695849a407da398feef48e4701d9f67c35e6e"
+        )
+
+        # Diagnostic output on mismatch
+        actual_length = len(canonical_bytes)
+        if actual_length != expected_length or digest != expected_hash:
+            import sys
+
+            print("\n[Vector 1 Golden Mismatch]", file=sys.stderr)
+            print(f"  Expected length: {expected_length}", file=sys.stderr)
+            print(f"  Actual length:   {actual_length}", file=sys.stderr)
+            print(f"  Expected hash:   {expected_hash}", file=sys.stderr)
+            print(f"  Actual hash:     {digest}", file=sys.stderr)
+            print("\n  Canonical bytes preview (first 300 chars):", file=sys.stderr)
+            print(
+                f"  {canonical_bytes[:300].decode('utf-8', errors='replace')}",
+                file=sys.stderr,
+            )
+
+        # Assert byte-for-byte fidelity
+        assert actual_length == expected_length, (
+            f"Vector 1 canonical bytes length mismatch: "
+            f"expected {expected_length}, got {actual_length}"
+        )
+        assert digest == expected_hash, (
+            f"Vector 1 SHA-256 digest mismatch: expected {expected_hash}, got {digest}"
+        )
+
+
+class TestVector3Golden:
+    """
+    Archytan Vector 3 (ESCALATE path) golden fixture test.
+
+    Validates byte-exact canonicalization parity with the Archytan ArbiterKernel
+    reference implementation. This test serves as a frozen contract validator:
+    any deviation in serialization, field order, or whitespace will break the
+    golden hash, signaling a regression.
+    """
+
+    def test_vector_3_canonical_golden(self):
+        """Verify Vector 3 byte-exact canonicalization and SHA-256 golden hash."""
+        import json
+
+        # Load the golden fixture directly
+        v3 = json.load(open("tests/fixtures/actuator_01/vector3_escalate.json"))
+
+        # Canonicalize
+        from src.gateway.governance.jcs_canonicalizer import jcs_canonicalize_plan
+
+        canonical_bytes = jcs_canonicalize_plan(v3)
+        digest = hashlib.sha256(canonical_bytes).hexdigest()
+
+        # Golden targets from Archytan ArbiterKernel
+        expected_length = 1523
+        expected_hash = (
+            "aa10d1f8c0093808be0db3fba8c8787f755c8183ca8ab214fac42aaaadd6c080"
+        )
+
+        # Diagnostic output on mismatch
+        actual_length = len(canonical_bytes)
+        if actual_length != expected_length or digest != expected_hash:
+            import sys
+
+            print("\n[Vector 3 Golden Mismatch]", file=sys.stderr)
+            print(f"  Expected length: {expected_length}", file=sys.stderr)
+            print(f"  Actual length:   {actual_length}", file=sys.stderr)
+            print(f"  Expected hash:   {expected_hash}", file=sys.stderr)
+            print(f"  Actual hash:     {digest}", file=sys.stderr)
+            print("\n  Canonical bytes preview (first 300 chars):", file=sys.stderr)
+            print(
+                f"  {canonical_bytes[:300].decode('utf-8', errors='replace')}",
+                file=sys.stderr,
+            )
+
+        # Assert byte-for-byte fidelity
+        assert actual_length == expected_length, (
+            f"Vector 3 canonical bytes length mismatch: "
+            f"expected {expected_length}, got {actual_length}"
+        )
+        assert digest == expected_hash, (
+            f"Vector 3 SHA-256 digest mismatch: expected {expected_hash}, got {digest}"
+        )
