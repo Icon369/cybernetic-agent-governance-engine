@@ -1,0 +1,84 @@
+{
+  "envelope": {
+    "protocolVersion": "1-alpha",
+    "policy": {
+      "version": 1,
+      "sources": { "allowedRoots": ["docs"] },
+      "decisions": { "path": "integrity/decisions.yaml" },
+      "rules": {
+        "requireEvidenceFor": ["factual", "recommendation"],
+        "contradictions": "review",
+        "rejectedDecisions": "block",
+        "responseMutation": "block",
+        "replay": "block"
+      }
+    },
+    "response": {
+      "content": "CAGE may release this governed response because approved evidence and an active decision support it.",
+      "sections": [
+        {
+          "sectionId": "answer",
+          "substantive": true,
+          "byteStart": 0,
+          "byteEnd": 100,
+          "sha256": "fd10ac479f97cea88176601700faac8d6eedabced849ec94fe7c90bfb30649b9"
+        }
+      ]
+    },
+    "sources": [
+      {
+        "sourceId": "source-release-policy",
+        "path": "docs/source.md",
+        "sha256": "5e023a449adcaaef66e336396ed4deb19d0abffc686bc3b3429cd3fa79341ef5",
+        "size": 94
+      }
+    ],
+    "decisionRegistryDigest": "628a45b2d038ab65aae21f95f7a85f1337131cee69e18346c497c4ed7c608ab6",
+    "decisions": [
+      {
+        "eventId": "event-release-1",
+        "decisionId": "decision-verified-release",
+        "revision": 1,
+        "action": "activate"
+      },
+      {
+        "eventId": "event-blocked-1",
+        "decisionId": "decision-rejected-release",
+        "revision": 1,
+        "action": "activate"
+      },
+      {
+        "eventId": "event-blocked-2",
+        "decisionId": "decision-rejected-release",
+        "revision": 2,
+        "action": "reject"
+      }
+    ],
+    "evidence": [
+      {
+        "evidenceId": "evidence-release-policy",
+        "sourceId": "source-release-policy",
+        "anchor": {
+          "byteStart": 0,
+          "byteEnd": 93,
+          "sha256": "811bdfddeb747a0fbb1e18047414e9de3edcdc6cc973f189a23f93d8378cc4e8"
+        }
+      }
+    ],
+    "claims": [
+      {
+        "claimId": "claim-release",
+        "sectionId": "answer",
+        "kind": "recommendation",
+        "decisionIds": ["decision-verified-release"],
+        "evidence": [
+          {
+            "evidenceId": "evidence-release-policy",
+            "role": "supporting",
+            "support": "direct"
+          }
+        ]
+      }
+    ]
+  }
+}

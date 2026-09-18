@@ -1,0 +1,14 @@
+version: 1
+events:
+  - eventId: event-release-1
+    decisionId: decision-verified-release
+    revision: 1
+    action: activate
+  - eventId: event-blocked-1
+    decisionId: decision-rejected-release
+    revision: 1
+    action: activate
+  - eventId: event-blocked-2
+    decisionId: decision-rejected-release
+    revision: 2
+    action: reject
