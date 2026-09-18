@@ -73,15 +73,15 @@ def test_schema_file_is_valid_json():
     assert "properties" in schema, "Schema must declare a 'properties' object."
 
 
-def test_all_32_agent_state_fields_present():
-    """Assert all 32 AgentState fields are present under properties.
+def test_all_36_agent_state_fields_present():
+    """Assert all 36 AgentState fields are present under properties.
     
     Failure means the expected field count has changed. This is a regression guard
     to detect unintentional field additions or removals.
     """
     schema_props = get_schema_properties()
-    assert len(schema_props) == 32, (
-        f"Expected exactly 32 properties in AgentState schema, found {len(schema_props)}. "
+    assert len(schema_props) == 36, (
+        f"Expected exactly 36 properties in AgentState schema, found {len(schema_props)}. "
         f"Properties: {sorted(schema_props)}"
     )
 

@@ -526,6 +526,105 @@ class DeferQueue:
         return token
 
     # ------------------------------------------------------------------
+    # atomic_resolve — atomic CAS ticket invalidation for idempotency
+    # ------------------------------------------------------------------
+
+    async def atomic_resolve(
+        self,
+        ticket_id: str,
+        expected_status: str = "PENDING",
+        new_status: str = "RESOLVED",
+    ) -> bool:
+        """Atomically transition a ticket status via Lua CAS (compare-and-swap).
+
+        Guarantees idempotency for resume operations: only the first resume
+        attempt succeeds. Subsequent attempts return False, enabling the
+        caller to return HTTP 409 Conflict to prevent double-execution.
+
+        This is the atomic primitive that prevents "double-spending" of
+        approval tickets — a core safety invariant for HITL resumption flows.
+
+        Implementation:
+            Uses a Lua script executed on Redis to ensure atomicity across
+            concurrent resume requests. The script checks current status and
+            only updates if it matches the expected value.
+
+        Args:
+            ticket_id:       The defer_id or ticket identifier to resolve.
+            expected_status: Status value required for transition (default: "PENDING").
+            new_status:      Target status value (default: "RESOLVED").
+
+        Returns:
+            True if the status was transitioned from expected_status to new_status.
+            False if the current status does not match expected_status (already
+            resolved, expired, or never existed).
+
+        Note:
+            This method only updates the status field. The caller is responsible
+            for updating the full token record (resolved_at_utc, resolution, etc.)
+            after atomic_resolve returns True.
+
+        Example::
+
+            # In a resume endpoint:
+            if not await defer_queue.atomic_resolve(ticket_id):
+                # Already resolved or expired
+                raise HTTPException(status_code=409, detail="Ticket already resolved")
+
+            # Proceed with graph resumption...
+        """
+        key = f"{_KEY_PREFIX}{ticket_id}"
+
+        # Lua script for atomic compare-and-swap on status field
+        lua_script = """
+        local current = redis.call('HGET', KEYS[1], 'status')
+        if current == ARGV[1] then
+            redis.call('HSET', KEYS[1], 'status', ARGV[2])
+            return 1
+        else
+            return 0
+        end
+        """
+
+        try:
+            result = await self._redis.eval(
+                lua_script,
+                1,  # number of keys
+                key,
+                expected_status,
+                new_status,
+            )
+
+            if result == 1:
+                logger.info(
+                    "[defer_queue] atomic_resolve SUCCESS: ticket_id=%s %s → %s",
+                    ticket_id,
+                    expected_status,
+                    new_status,
+                )
+                return True
+            else:
+                # CAS failed — current status does not match expected
+                current_status = await self._redis.hget(key, "status")
+                logger.warning(
+                    "[defer_queue] atomic_resolve FAILED: ticket_id=%s expected=%s "
+                    "current=%s — ticket already resolved or expired",
+                    ticket_id,
+                    expected_status,
+                    current_status,
+                )
+                return False
+
+        except Exception as exc:
+            logger.error(
+                "[defer_queue] atomic_resolve raised exception for ticket_id=%s: %s",
+                ticket_id,
+                exc,
+            )
+            # Fail closed — treat errors as "already resolved" to prevent double-execution
+            return False
+
+    # ------------------------------------------------------------------
     # approve — append an approval and check quorum (Phase 2, Stream B)
     # ------------------------------------------------------------------
 

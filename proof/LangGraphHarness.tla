@@ -79,8 +79,9 @@ EXTENDS Naturals, FiniteSets, Sequences
 -----------------------------------------------------------------------------
 
 CONSTANTS
-    MaxLoopCount,      \* Safety breaker loop cap (default: 3)
-    HITLTimeoutTicks   \* HITL TTL in abstract time ticks (default: 5)
+    MaxLoopCount,           \* Safety breaker loop cap (default: 3)
+    HITLTimeoutTicks,       \* HITL TTL in abstract time ticks (default: 5)
+    MaxConsecutiveDenials   \* Budget cap for consecutive denials (default: 2)
 
 -----------------------------------------------------------------------------
 (* GRAPH PHASES — Lifecycle states of the LangGraph execution *)
@@ -88,17 +89,21 @@ CONSTANTS
 
 \* Graph execution phases
 Phases == {
-    "INIT",              \* Initial state, awaiting input
-    "GUARDRAIL",         \* NeMo input guardrail check
-    "ROUTING",           \* Supervisor routing decision
-    "GOVERNANCE_CHECK",  \* Symbolic Governor validation (7-tier)
-    "FTRA_CHECK",        \* FTRA Tier 0.5 reachability analysis
-    "LLM_CALL",          \* LLM inference in progress
-    "HITL_PENDING",      \* Awaiting human-in-the-loop approval
-    "DEFER_PENDING",     \* Parked in DeferQueue for data hydration
-    "PAUSE_PENDING",     \* Temporarily paused, awaiting resume
-    "RESPONSE",          \* Successful completion with output
-    "ERROR"              \* Terminal error state
+    "INIT",                  \* Initial state, awaiting input
+    "GUARDRAIL",             \* NeMo input guardrail check
+    "ROUTING",               \* Supervisor routing decision
+    "GOVERNANCE_CHECK",      \* Symbolic Governor validation (7-tier)
+    "FTRA_CHECK",            \* FTRA Tier 0.5 reachability analysis
+    "LLM_CALL",              \* LLM inference in progress
+    "HITL_PENDING",          \* Awaiting human-in-the-loop approval
+    "DEFER_PENDING",         \* Parked in DeferQueue for data hydration
+    "PAUSE_PENDING",         \* Temporarily paused, awaiting resume
+    "RESPONSE",              \* Successful completion with output
+    "ERROR",                 \* Terminal error state
+    "Active",                \* Client session active
+    "ParkedForReview",       \* Client session parked pending review
+    "PausedBudgetExceeded",  \* Client session paused due to budget cap
+    "Completed"              \* Client session completed successfully
 }
 
 \* Canonical governance decisions (from decisions.py GovernanceDecision enum)
@@ -122,23 +127,26 @@ SafetyStatuses == {"APPROVED", "BLOCKED", "ESCALATED", "SKIPPED", "DEFERRED", "M
 -----------------------------------------------------------------------------
 
 VARIABLES
-    phase,              \* Current execution phase
-    loop_count,         \* Recursion depth counter for safety breaker
-    governance_decision,\* Latest GovernanceDecision from validate_action()
-    ftra_verdict,       \* FTRA Tier 0.5 verdict
-    safety_status,      \* OPA safety gate status
-    seal_issued,        \* TRUE if routing seal was generated
-    seal_valid,         \* TRUE if seal passed verification
-    evidence_committed, \* TRUE if evidence chain record committed
-    hitl_ticks_remaining,\* Countdown for HITL TTL expiration
-    guardrail_blocked,  \* TRUE if NeMo guardrail blocked input
-    output_rail_applied,\* TRUE if NeMo output rail was executed
-    resolved_allow      \* TRUE only when all gates passed AND seal valid
+    phase,                \* Current execution phase
+    loop_count,           \* Recursion depth counter for safety breaker
+    governance_decision,  \* Latest GovernanceDecision from validate_action()
+    ftra_verdict,         \* FTRA Tier 0.5 verdict
+    safety_status,        \* OPA safety gate status
+    seal_issued,          \* TRUE if routing seal was generated
+    seal_valid,           \* TRUE if seal passed verification
+    evidence_committed,   \* TRUE if evidence chain record committed
+    hitl_ticks_remaining, \* Countdown for HITL TTL expiration
+    guardrail_blocked,    \* TRUE if NeMo guardrail blocked input
+    output_rail_applied,  \* TRUE if NeMo output rail was executed
+    resolved_allow,       \* TRUE only when all gates passed AND seal valid
+    consecutive_denials,  \* Counter for consecutive DENY verdicts
+    deferral_resolved     \* Set of resolved deferral ticket IDs
 
 \* All variables for UNCHANGED expressions
 vars == <<phase, loop_count, governance_decision, ftra_verdict, safety_status,
           seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
-          guardrail_blocked, output_rail_applied, resolved_allow>>
+          guardrail_blocked, output_rail_applied, resolved_allow,
+          consecutive_denials, deferral_resolved>>
 
 -----------------------------------------------------------------------------
 (* TYPE INVARIANT *)
@@ -157,6 +165,8 @@ TypeOK ==
     /\ guardrail_blocked \in BOOLEAN
     /\ output_rail_applied \in BOOLEAN
     /\ resolved_allow \in BOOLEAN
+    /\ consecutive_denials \in 0..MaxConsecutiveDenials + 1
+    /\ deferral_resolved \subseteq (1..100)  \* Ticket IDs 1-100
 
 -----------------------------------------------------------------------------
 (* SAFETY INVARIANTS *)
@@ -199,9 +209,24 @@ HITLTimeoutSafety ==
 OutputRailCoverage ==
     (phase = "RESPONSE" /\ ~guardrail_blocked) => output_rail_applied
 
+(* SingleUseDeferralTicket: A deferral ticket cannot be resolved more than once.
+   
+   Client SDK cross-reference: DeferQueue single-use token consumption
+   This ensures audit trail integrity and prevents replay attacks. *)
+SingleUseDeferralTicket ==
+    \A ticket \in deferral_resolved : Cardinality({t \in deferral_resolved : t = ticket}) = 1
+
+(* BudgetNeverExceededWithoutPause: Budget cap enforcement.
+   
+   If consecutive denials exceed MaxConsecutiveDenials, state must be PausedBudgetExceeded.
+   This prevents runaway client sessions from exhausting governance budget. *)
+BudgetNeverExceededWithoutPause ==
+    (consecutive_denials > MaxConsecutiveDenials) => (phase = "PausedBudgetExceeded")
+
 \* Combined safety invariant
 Safety == NoDirectBind /\ EvidenceChainIntegrity /\ SealGateIntegrity
        /\ HITLTimeoutSafety /\ OutputRailCoverage
+       /\ SingleUseDeferralTicket /\ BudgetNeverExceededWithoutPause
 
 -----------------------------------------------------------------------------
 (* INITIAL STATE *)
@@ -220,6 +245,8 @@ Init ==
     /\ guardrail_blocked = FALSE
     /\ output_rail_applied = FALSE
     /\ resolved_allow = FALSE
+    /\ consecutive_denials = 0
+    /\ deferral_resolved = {}
 
 -----------------------------------------------------------------------------
 (* ACTIONS — Graph node transitions *)
@@ -293,9 +320,10 @@ GovernanceDeny ==
     /\ phase = "GOVERNANCE_CHECK"
     /\ phase' = "ERROR"
     /\ governance_decision' = "DENY"
+    /\ consecutive_denials' = consecutive_denials + 1
     /\ UNCHANGED <<loop_count, ftra_verdict, safety_status,
                    seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
-                   guardrail_blocked, output_rail_applied, resolved_allow>>
+                   guardrail_blocked, output_rail_applied, resolved_allow, deferral_resolved>>
 
 (* GovernanceRequireApproval: GOVERNANCE_CHECK → HITL_PENDING
    Governance requires human sign-off (MANUAL_REVIEW from OPA). *)
@@ -435,13 +463,17 @@ HITLTick ==
                    guardrail_blocked, output_rail_applied, resolved_allow>>
 
 (* DeferResolve: DEFER_PENDING → GOVERNANCE_CHECK
-   Deferred request is resolved with hydrated data, retry governance. *)
+   Deferred request is resolved with hydrated data, retry governance.
+   Records ticket resolution to enforce single-use semantics. *)
 DeferResolve ==
     /\ phase = "DEFER_PENDING"
-    /\ phase' = "GOVERNANCE_CHECK"
+    /\ \E ticket \in (1..100) :
+        /\ ticket \notin deferral_resolved
+        /\ phase' = "GOVERNANCE_CHECK"
+        /\ deferral_resolved' = deferral_resolved \cup {ticket}
     /\ UNCHANGED <<loop_count, governance_decision, ftra_verdict, safety_status,
                    seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
-                   guardrail_blocked, output_rail_applied, resolved_allow>>
+                   guardrail_blocked, output_rail_applied, resolved_allow, consecutive_denials>>
 
 (* DeferTimeout: DEFER_PENDING → ERROR
    Defer TTL expires without resolution. *)
@@ -488,7 +520,50 @@ LoopCapExceeded ==
     /\ phase' = "ERROR"
     /\ UNCHANGED <<loop_count, governance_decision, ftra_verdict, safety_status,
                    seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
-                   guardrail_blocked, output_rail_applied, resolved_allow>>
+                   guardrail_blocked, output_rail_applied, resolved_allow,
+                   consecutive_denials, deferral_resolved>>
+
+(* TriggerDenial: Active → ParkedForReview
+   Client SDK session receives DENY verdict and parks for review. *)
+TriggerDenial ==
+    /\ phase = "Active"
+    /\ consecutive_denials < MaxConsecutiveDenials
+    /\ phase' = "ParkedForReview"
+    /\ consecutive_denials' = consecutive_denials + 1
+    /\ UNCHANGED <<loop_count, governance_decision, ftra_verdict, safety_status,
+                   seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
+                   guardrail_blocked, output_rail_applied, resolved_allow, deferral_resolved>>
+
+(* TriggerDeferral: Active → DEFER_PENDING
+   Client SDK session receives DEFER verdict for data hydration. *)
+TriggerDeferral ==
+    /\ phase = "Active"
+    /\ phase' = "DEFER_PENDING"
+    /\ UNCHANGED <<loop_count, governance_decision, ftra_verdict, safety_status,
+                   seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
+                   guardrail_blocked, output_rail_applied, resolved_allow,
+                   consecutive_denials, deferral_resolved>>
+
+(* ResumeApproval: ParkedForReview → Active
+   Client SDK session resumes after manual review approval. *)
+ResumeApproval ==
+    /\ phase = "ParkedForReview"
+    /\ phase' = "Active"
+    /\ consecutive_denials' = 0  \* Reset denial counter on approval
+    /\ UNCHANGED <<loop_count, governance_decision, ftra_verdict, safety_status,
+                   seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
+                   guardrail_blocked, output_rail_applied, resolved_allow, deferral_resolved>>
+
+(* ExceedBudget: Active → PausedBudgetExceeded
+   Client SDK session exhausts consecutive denial budget. *)
+ExceedBudget ==
+    /\ phase = "Active"
+    /\ consecutive_denials >= MaxConsecutiveDenials
+    /\ phase' = "PausedBudgetExceeded"
+    /\ UNCHANGED <<loop_count, governance_decision, ftra_verdict, safety_status,
+                   seal_issued, seal_valid, evidence_committed, hitl_ticks_remaining,
+                   guardrail_blocked, output_rail_applied, resolved_allow,
+                   consecutive_denials, deferral_resolved>>
 
 -----------------------------------------------------------------------------
 (* NEXT STATE RELATION *)
@@ -521,6 +596,10 @@ Next ==
     \/ PauseTimeout
     \/ LoopBack
     \/ LoopCapExceeded
+    \/ TriggerDenial
+    \/ TriggerDeferral
+    \/ ResumeApproval
+    \/ ExceedBudget
 
 -----------------------------------------------------------------------------
 (* SPECIFICATION *)

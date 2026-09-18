@@ -29,6 +29,9 @@ from src.governed_financial_advisor.utils.text_utils import strip_thinking_tags
 
 logger = logging.getLogger("GovernanceAuditor")
 
+# Policy-probing attack mitigation constant (ADR-008)
+MAX_CONSECUTIVE_DENIALS = 2
+
 
 def verify_hmac_signature(state: AgentState) -> str:
     """Verify the governance signature in the state.
@@ -99,12 +102,47 @@ async def explainer_node(state: AgentState) -> dict[str, Any]:
     Formal Governance Auditor Node.
     Extracts audit trail, verifies signatures, maps OPA rules, and justifies the verdict.
 
+    Policy-Probing Budget Check (ADR-008 Enforcement):
+    Before generating explanations, checks if consecutive_denials >= MAX_CONSECUTIVE_DENIALS (2).
+    If exceeded, sets status to HARD_PAUSE_BUDGET_EXCEEDED and halts graph execution,
+    requiring human review to prevent infinite replanning loops.
+
     Optimization (Group D / D1): For low-risk verdicts (clean ALLOW, no violations,
     no HITL escalation, risk_score < 0.5), a single fast-model call produces both the
     justification narrative and the user-facing response, skipping the slower
     MODEL_REASONING call entirely.  For high-risk verdicts the original two-call path
     is preserved: MODEL_REASONING for justification, MODEL_FAST for response.
     """
+    # Check consecutive denials budget FIRST (ADR-008 enforcement)
+    consecutive_denials = state.get("consecutive_denials", 0)
+
+    if consecutive_denials >= MAX_CONSECUTIVE_DENIALS:
+        logger.error(
+            "🛑 Explainer Node: MAX_CONSECUTIVE_DENIALS exceeded (%d >= %d) — "
+            "halting graph with HARD_PAUSE_BUDGET_EXCEEDED (requires human review)",
+            consecutive_denials,
+            MAX_CONSECUTIVE_DENIALS,
+        )
+        last_violation = state.get("last_violation", {})
+        budget_exceeded_msg = (
+            f"🛑 **Replanning Budget Exhausted**\n\n"
+            f"This request has been denied {consecutive_denials} consecutive times "
+            f"by the governance system without a successful approval. To prevent "
+            f"policy-probing attacks, the agent has been paused and requires human review.\n\n"
+            f"**Most Recent Violation:**\n"
+            f"- Reason Code: {last_violation.get('reason_code', 'UNKNOWN')}\n"
+            f"- Policy Rule: {last_violation.get('policy_rule', 'unknown')}\n"
+            f"- Audit ID: {last_violation.get('audit_id', 'N/A')}\n\n"
+            f"Please review the governance audit trail and either approve the action "
+            f"manually or reformulate the request to comply with policy constraints."
+        )
+        return {
+            "messages": [("ai", budget_exceeded_msg)],
+            "safety_status": "HARD_PAUSE_BUDGET_EXCEEDED",
+            "next_step": "human_review",  # Halt graph, require human intervention
+        }
+
+    # Budget OK, proceed with normal auditor flow
     logger.info("🛡️ Explainer Node: Acting as Formal Governance Auditor.")
     tracer = get_tracer()
 
@@ -119,6 +157,30 @@ async def explainer_node(state: AgentState) -> dict[str, Any]:
         user_msg = (
             state["messages"][-1].content if state.get("messages") else "No context"
         )
+
+        # Build self-correction prompt using last_violation if present
+        last_violation = state.get("last_violation")
+        if last_violation:
+            # DENY path with violation details — construct self-correction prompt
+            violation_guidance = (
+                f"\n\n**Governance Violation Details:**\n"
+                f"- Reason Code: {last_violation.get('reason_code', 'UNKNOWN')}\n"
+                f"- Policy Rule: {last_violation.get('policy_rule', 'unknown')}\n"
+                f"- Evidence: {last_violation.get('evidence', 'N/A')}\n"
+            )
+            alternatives = last_violation.get("suggested_alternatives", [])
+            if alternatives:
+                violation_guidance += "\n**Suggested Alternatives:**\n"
+                for alt in alternatives:
+                    violation_guidance += f"- {alt}\n"
+            violation_guidance += (
+                f"\n**Self-Correction Instruction:**\n"
+                f"Explain the violation clearly to the user and guide them toward "
+                f"a compliant reformulation. If this is the {consecutive_denials}th "
+                f"denial, emphasize that one more denial will trigger HARD_PAUSE."
+            )
+        else:
+            violation_guidance = ""
 
         if _is_low_risk_verdict(evaluation_result):  # type: ignore[arg-type]
             # --- Single fast-LLM call: combined justification + user response ---
@@ -165,6 +227,7 @@ async def explainer_node(state: AgentState) -> dict[str, Any]:
                     f"Context: The system reached a verdict of {verdict}.\n"
                     f"OPA Rules triggered: {', '.join(rules)}\n"
                     f"User Intent/Plan: {execution_plan}\n"
+                    f"{violation_guidance}\n"
                     f"Explain how the hard OPA rules relate to the semantic intent of the user."
                 )
                 response = await llm.ainvoke([SystemMessage(content=prompt)])
@@ -188,6 +251,7 @@ async def explainer_node(state: AgentState) -> dict[str, Any]:
             explainer_sys = (
                 f"{get_explainer_instruction()}\n\n"
                 f"GOVERNANCE AUDIT:\n{summary}\n\n"
+                f"{violation_guidance}\n\n"
                 f"USER MESSAGE: {user_msg}\n"
                 f"ACTION PLAN: {execution_plan}\n"
             )

@@ -1,0 +1,272 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# OSCAL Component Definition
+# CAGE Client SDK — Out-of-Process Policy Decision Point (PDP) Client
+#
+# This component definition documents the CAGE Client SDK security controls,
+# which enable client applications to enforce governance decisions via an
+# out-of-process PDP architecture with cryptographic routing seal validation.
+
+component-definition:
+  uuid: "8a9f5c3d-2b1e-4f7a-9c8d-5e6f7a8b9c0d"
+  metadata:
+    title: "CAGE Client SDK — Out-of-Process PDP Client Component Definition"
+    version: "1.0.0"
+    oscal-version: "1.0.4"
+    last-modified: "2026-09-18T20:47:00Z"
+    remarks: >
+      This component definition maps the CAGE Client SDK enforcement mechanisms
+      to NIST SP 800-53 Rev 5 controls. The SDK implements an out-of-process
+      Policy Decision Point (PDP) architecture where governance decisions are
+      evaluated by the central governance gateway and cryptographically sealed
+      before transmission to client applications. The SDK validates routing
+      seals via HMAC-SHA256 verification and enforces W3C traceparent propagation
+      for distributed audit trail integrity.
+
+  components:
+    # -----------------------------------------------------------------------
+    # Component 1: CAGE Client SDK
+    # Enforces: AC-3 (Access Enforcement), AU-10 (Non-Repudiation),
+    #           SC-8 (Transmission Confidentiality), SC-23 (Session Authenticity)
+    # -----------------------------------------------------------------------
+    - uuid: "7c8e9f1a-3d4b-5c6e-8f9a-1b2c3d4e5f6a"
+      title: "CAGE Client SDK"
+      type: software
+      description: >
+        Python/TypeScript client library providing out-of-process Policy Decision
+        Point (PDP) integration for AI governance enforcement. The SDK validates
+        cryptographic routing seals issued by the central governance gateway,
+        enforces W3C traceparent propagation for distributed tracing, and implements
+        session lifecycle management with consecutive denial budget enforcement.
+      purpose: >
+        Enables client applications to delegate governance decisions to the central
+        CAGE governance gateway while maintaining cryptographic proof of authorization
+        via HMAC routing seals. Implements fail-closed semantics where actions are
+        blocked by default unless a valid routing seal is presented. Enforces
+        audit trail continuity via W3C traceparent headers and implements session
+        budget controls to prevent runaway denial loops.
+      responsible-roles:
+        - role-id: provider
+      control-implementations:
+        - uuid: "9b1c2d3e-4f5a-6b7c-8d9e-0f1a2b3c4d5e"
+          source: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home"
+          description: "NIST SP 800-53 Rev 5 controls implemented by the CAGE Client SDK"
+          implemented-requirements:
+            - uuid: "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+              control-id: ac-3
+              description: |
+                Access enforcement is implemented via out-of-process PDP client mediation.
+                The CAGE Client SDK delegates all access control decisions to the central
+                governance gateway (src/gateway/governance/symbolic_governor.py), which
+                evaluates requests against the 9-tier governance pipeline (FTRA Tier 0.5,
+                STPA Tier 1, Confidence Tier 2, CBF/OPA Tier 3, Fiscal Tier 4, Consensus
+                Tier 5, Causal Tier 6, FRIA Tier 7).
+
+                The SDK enforces fail-closed semantics: actions are BLOCKED by default
+                unless a valid HMAC-SHA256 routing seal is returned by the governance
+                gateway. The SDK validates the seal signature before allowing execution
+                to proceed, ensuring that no action can execute without passing through
+                the full governance pipeline.
+
+                Routing seal validation enforces:
+                - HMAC-SHA256 signature verification using shared secret
+                - TTL expiration check (30-second micro-TTL window)
+                - Single-use nonce consumption via Redis atomic SETNX
+                - Action slug and thread ID binding to prevent seal reuse
+
+                The SDK implements session lifecycle management with consecutive denial
+                budget enforcement (MaxConsecutiveDenials = 2). After exceeding the
+                budget, the session transitions to PausedBudgetExceeded state, preventing
+                runaway client sessions from exhausting governance capacity.
+
+                Reference implementation:
+                - Client SDK seal validation: src/governed_financial_advisor/tools/api.py
+                - Gateway seal generation: src/gateway/governance/routing_seal.py
+                - Session lifecycle: TLA+ LangGraphHarness.tla states (Active, ParkedForReview,
+                  PausedBudgetExceeded, Completed)
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: implementation-date
+                  value: "2026-09-18"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AC-3"
+                  rel: reference
+                - href: "../../src/gateway/governance/routing_seal.py"
+                  rel: implementation
+                  text: "Routing seal generation and validation"
+                - href: "../../src/governed_financial_advisor/tools/api.py"
+                  rel: implementation
+                  text: "Client SDK seal validation enforcement"
+                - href: "../../proof/LangGraphHarness.tla"
+                  rel: verification
+                  text: "TLA+ formal specification of session lifecycle"
+
+            - uuid: "2b3c4d5e-6f7a-8b9c-0d1e-2f3a4b5c6d7e"
+              control-id: au-10
+              description: |
+                Non-repudiation is implemented via W3C traceparent propagation and HMAC
+                routing seal validation. Every governance request carries a W3C traceparent
+                header (trace-id, span-id, trace-flags) that links the client request to
+                the governance decision in the central audit trail.
+
+                The SDK validates the HMAC-SHA256 routing seal before executing any action,
+                creating a cryptographic binding between the governance decision and the
+                executed action. The seal includes:
+                - Action slug (e.g., "execute_trade")
+                - Thread ID (conversation identifier)
+                - Timestamp (UTC ISO 8601)
+                - TTL expiration (30 seconds)
+
+                Seal validation failures are logged with full request context, creating an
+                audit trail of both successful authorizations and failed validation attempts.
+                The single-use nonce consumption via Redis SETNX ensures that each seal can
+                only be validated once, preventing replay attacks.
+
+                The SDK enforces traceparent propagation across all governance API calls,
+                ensuring that distributed traces can be correlated across client sessions,
+                gateway evaluations, and downstream tier executions (OPA, CBF, FRIA).
+
+                W3C Trace Context specification: https://www.w3.org/TR/trace-context/
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: w3c-traceparent-compliance
+                  value: "true"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=AU-10"
+                  rel: reference
+                - href: "https://www.w3.org/TR/trace-context/"
+                  rel: reference
+                  text: "W3C Trace Context specification"
+                - href: "../../src/gateway/infrastructure/telemetry.py"
+                  rel: implementation
+                  text: "W3C traceparent extraction and propagation"
+                - href: "../../src/gateway/governance/routing_seal.py"
+                  rel: implementation
+                  text: "HMAC routing seal verification"
+
+            - uuid: "3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f"
+              control-id: sc-8
+              description: |
+                Transmission confidentiality is implemented via mTLS HTTP/2 transport
+                between client SDK and governance gateway. All governance API calls are
+                transmitted over TLS 1.2+ encrypted channels with mutual certificate
+                verification.
+
+                The SDK enforces TLS 1.2+ minimum version via ssl.TLSVersion.TLSv1_2
+                in create_hardened_client_context() (src/gateway/infrastructure/tls_context.py).
+                Legacy protocols (TLS 1.0, TLS 1.1) are explicitly disabled via
+                ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1.
+
+                mTLS mutual authentication ensures:
+                - Client presents valid X.509 certificate to gateway
+                - Gateway validates client certificate chain against CA bundle
+                - Server certificate is validated by client against trusted CA
+                - All traffic is encrypted end-to-end
+
+                NIST SP 800-52 Rev. 2 compliance is enforced via cipher suite restrictions
+                and protocol version pinning. TLS enforcement is verified via
+                tests/test_tls_enforcement.py::TestTlsProtocolStandards.
+
+                The SDK implements HTTP/2 multiplexing over the TLS connection, reducing
+                latency for high-frequency governance validation requests.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: tls-minimum-version
+                  value: "1.2"
+                - name: nist-sp800-52-compliance
+                  value: "true"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SC-8"
+                  rel: reference
+                - href: "../../src/gateway/infrastructure/tls_context.py"
+                  rel: implementation
+                  text: "TLS 1.2+ enforcement and cipher suite restrictions"
+                - href: "../../tests/test_tls_enforcement.py"
+                  rel: test
+                  text: "TLS protocol standards verification"
+
+            - uuid: "4d5e6f7a-8b9c-0d1e-2f3a-4b5c6d7e8f9a"
+              control-id: sc-23
+              description: |
+                Session authenticity is implemented via routing seal micro-TTL validation.
+                Each routing seal carries a 30-second TTL window, enforcing temporal
+                freshness of governance decisions and preventing stale authorization reuse.
+
+                The SDK validates:
+                - Seal timestamp is within 30-second window of current time
+                - Seal has not been previously consumed (single-use nonce via Redis SETNX)
+                - Seal signature matches expected HMAC-SHA256 hash
+                - Seal action slug matches requested action
+                - Seal thread ID matches current conversation context
+
+                TTL enforcement prevents authorization staleness attacks where a valid
+                governance decision from 5 minutes ago could be replayed to execute an
+                action under different market conditions or risk profiles.
+
+                The 30-second micro-TTL balances security and usability:
+                - Short enough to prevent meaningful staleness (market conditions change)
+                - Long enough to accommodate network latency and client processing time
+
+                Session lifecycle state transitions (Active → ParkedForReview →
+                PausedBudgetExceeded) are tracked per-client-session and persist across
+                seal validations, providing session continuity while enforcing per-request
+                freshness.
+
+                Formal verification: TLA+ LangGraphHarness.tla models seal TTL expiration
+                and single-use consumption semantics via the SingleUseDeferralTicket invariant.
+              props:
+                - name: implementation-status
+                  value: implemented
+                - name: control-origination
+                  value: system-specific
+                - name: seal-ttl-seconds
+                  value: "30"
+                - name: single-use-enforcement
+                  value: "true"
+              links:
+                - href: "https://csrc.nist.gov/projects/cprt/api/cprt/framework/version/SP_800_53_5_1_1/home?element=SC-23"
+                  rel: reference
+                - href: "../../src/gateway/governance/routing_seal.py"
+                  rel: implementation
+                  text: "Routing seal TTL validation and single-use consumption"
+                - href: "../../proof/LangGraphHarness.tla"
+                  rel: verification
+                  text: "TLA+ SingleUseDeferralTicket invariant"
+
+    # -----------------------------------------------------------------------
+    # Related Components (References Only)
+    # -----------------------------------------------------------------------
+    related-components:
+      - component-uuid: "56654b26-d648-4e47-bbc8-19edd3ec67ba"
+        title: "Governance Gateway"
+        description: >
+          Central governance gateway that evaluates access control decisions
+          and issues cryptographic routing seals. The CAGE Client SDK validates
+          seals generated by this component.
+      - component-uuid: "7c8e9f1a-3d4b-5c6e-8f9a-1b2c3d4e5f6a"
+        title: "DeferQueue"
+        description: >
+          Persistent queue for deferred governance decisions requiring data
+          hydration or manual review. The CAGE Client SDK enforces single-use
+          deferral ticket consumption semantics.
