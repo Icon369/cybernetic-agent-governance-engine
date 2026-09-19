@@ -306,3 +306,8 @@ poam-drift-check: ## Check that all closed POAM findings have a corresponding Lu
 check-agent-state-schema: ## Verify AgentState schema freshness
 	@echo "==> Verifying AgentState schema freshness..."
 	@uv run python scripts/generate_agent_state_schema.py --check
+
+.PHONY: build-client-sdk
+build-client-sdk: ## Build standalone CAGE Client SDK wheel and sdist in packages/cage-client/
+	@echo "==> Building CAGE Client SDK (packages/cage-client)..."
+	@cd packages/cage-client && uv build

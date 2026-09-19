@@ -231,7 +231,7 @@ async def safety_check_node(state: AgentState) -> dict[str, Any]:
                     "consecutive_denials": new_denials,
                     "last_violation": {
                         "policy_rule": "GATEWAY_ERROR",
-                        "evidence": f"Failed to validate action due to {type(exc).__name__}: {str(exc)}",
+                        "evidence": f"Failed to validate action due to {type(exc).__name__}: {exc!s}",
                         "audit_id": None,
                         "recoverable": False,
                     },
@@ -290,7 +290,7 @@ async def safety_check_node(state: AgentState) -> dict[str, Any]:
             "consecutive_denials": new_denials,
             "last_violation": {
                 "policy_rule": "CLIENT_INIT_ERROR",
-                "evidence": f"Failed to initialize governance client: {type(exc).__name__}: {str(exc)}",
+                "evidence": f"Failed to initialize governance client: {type(exc).__name__}: {exc!s}",
                 "audit_id": None,
                 "recoverable": False,
             },

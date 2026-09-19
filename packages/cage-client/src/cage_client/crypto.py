@@ -23,7 +23,7 @@ import secrets
 import time
 from typing import Optional
 
-from src.gateway.client.exceptions import RoutingSealVerificationError
+from .exceptions import RoutingSealVerificationError
 
 
 def verify_routing_seal(
