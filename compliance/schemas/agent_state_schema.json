@@ -64,7 +64,9 @@
         "APPROVED",
         "BLOCKED",
         "ESCALATED",
-        "SKIPPED"
+        "SKIPPED",
+        "DEFERRED",
+        "HARD_PAUSE_BUDGET_EXCEEDED"
       ]
     },
     "governance_signature": {
@@ -214,6 +216,27 @@
       ]
     },
     "pause_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "consecutive_denials": {
+      "type": "integer"
+    },
+    "last_violation": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "deferral_ticket_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "deferral_reason": {
       "type": [
         "string",
         "null"

@@ -80,6 +80,15 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     logger.info("Initializing Agent Graph...")
     app.state.graph = create_graph(redis_url=Config.REDIS_URL)
 
+    # Initialize DeferQueue for atomic ticket resolution
+    import redis.asyncio as aioredis
+
+    from src.gateway.governance.defer_queue import DeferQueue
+
+    redis_client_db1 = aioredis.from_url(Config.REDIS_URL, db=1, decode_responses=True)
+    app.state.defer_queue = DeferQueue(redis_client=redis_client_db1)
+    logger.info("✅ DeferQueue initialized (db=1)")
+
     # ── CTRL_KMS_001: Eagerly initialise the governance signer ────────────
     # generate_governance_signature() (evaluator_node.py) calls
     # get_governance_signer() lazily on the first plan approval. If
@@ -138,13 +147,18 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     try:
         if hasattr(app.state.graph, "checkpointer") and app.state.graph.checkpointer:
             cp = app.state.graph.checkpointer
-            # Check for AsyncRedisSaver (lazy check to avoid import)
-            if "RedisSaver" in str(type(cp)):
-                logger.debug("Checking Redis Checkpointer setup...")
-                if hasattr(cp, "setup"):
+            # Check for AsyncRedisSaver and call setup() if available
+            # Only AsyncRedisSaver has setup(); MemorySaver does not
+            try:
+                from langgraph.checkpoint.redis import AsyncRedisSaver
+                
+                if isinstance(cp, AsyncRedisSaver):
                     logger.info("Running Redis Checkpointer setup()...")
                     await cp.setup()
                     logger.info("Redis Checkpointer setup complete")
+            except ImportError:
+                # langgraph-checkpoint-redis not installed; skip setup
+                logger.debug("langgraph-checkpoint-redis not available; skipping setup")
     except Exception as e:
         logger.warning("Failed to setup Redis Checkpointer: %s", e)
 
@@ -204,6 +218,7 @@ class ApprovalResumeRequest(BaseModel):
     """Request body for POST /v1/approvals/{thread_id}/resume.
 
     Attributes:
+        ticket_id: Unique defer ticket ID for atomic idempotency enforcement.
         approved:  Whether the trade is approved or rejected.
         reviewer:  Identity of the human reviewer (email or employee ID).
                    Used for ISO 42001 A.7.2 accountability attribution.
@@ -214,6 +229,7 @@ class ApprovalResumeRequest(BaseModel):
         comment:   Optional supplementary note (legacy field — prefer rationale).
     """
 
+    ticket_id: str | None = None
     approved: bool
     reviewer: str
     rationale: str  # mandatory — cannot be empty string
@@ -500,6 +516,11 @@ async def resume_approval(  # type: ignore[no-untyped-def]
     """
     Resume an interrupted graph that is awaiting human trade approval.
 
+    Implements atomic ticket invalidation to prevent double-execution:
+      1. Atomically resolve the ticket via DeferQueue.atomic_resolve()
+      2. If ticket already resolved/expired → HTTP 409 Conflict
+      3. If CAS succeeds → proceed with graph resumption
+
     The graph must already be in an interrupted state (paused at approval_node)
     for the given thread_id.  Issues a Command(resume={...}) to unblock it.
 
@@ -507,11 +528,39 @@ async def resume_approval(  # type: ignore[no-untyped-def]
         {"status": "resumed", "thread_id": str, "approved": bool}
 
     Raises:
+        409 if the ticket_id has already been resolved or expired.
         404 if thread_id is not found or is not awaiting approval.
         500 on unexpected errors.
     """
     graph = request.app.state.graph
+    defer_queue = getattr(request.app.state, "defer_queue", None)
     config = {"configurable": {"thread_id": thread_id}}
+
+    # ------------------------------------------------------------------
+    # ATOMIC IDEMPOTENCY GATE: Prevent double-execution via CAS
+    # Only the first resume attempt for a given ticket_id succeeds.
+    # ------------------------------------------------------------------
+    if req.ticket_id and defer_queue is not None:
+        if not await defer_queue.atomic_resolve(req.ticket_id, "PENDING", "RESOLVED"):
+            logger.warning(
+                "[Approvals] Ticket already resolved or expired: ticket_id=%s thread_id=%s",
+                req.ticket_id,
+                thread_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Ticket '{req.ticket_id}' has already been resolved or expired. "
+                    "This approval decision cannot be applied twice. If you need to "
+                    "re-submit, please generate a new approval request."
+                ),
+            )
+
+        logger.info(
+            "[Approvals] Atomic ticket resolution succeeded: ticket_id=%s thread_id=%s",
+            req.ticket_id,
+            thread_id,
+        )
 
     # Check that this thread_id exists and is interrupted
     try:
@@ -757,7 +806,7 @@ def _submit_kfp_run(pipeline_id: str, trigger_reason: str, trace_ids: list) -> d
 
         client = kfp.Client(host=kfp_endpoint)
         run = client.create_run_from_pipeline_func(
-            governance_pipeline,
+            governance_pipeline,  # type: ignore[arg-type]
             arguments={
                 "compliance_bridge_url": os.environ.get(
                     "COMPLIANCE_BRIDGE_URL", "http://compliance-bridge/"

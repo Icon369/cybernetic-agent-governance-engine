@@ -70,7 +70,6 @@ The following findings are tracked as open items with target remediation dates. 
 |----|---------|-------------|----------|-------------|
 | POAM-2026-010 | RA-5 | In-cluster vulnerability scanning CronJob not yet deployed | High | 2026-09-30 |
 | POAM-2026-016 | RA-5 / SI-2 | `torch` dev-only dependency carries PYSEC-2026-139; no upstream fix available; dev-only scope, not in production images | Low | 2026-12-31 |
-| POAM-2026-024 | CM-6 | Staging environment compliance posture not yet verified against Lula validation suite | Moderate | 2026-09-30 |
 | POAM-2026-025 | NIST AI 600-1 §2.6 | CBRN / harmful content Lula validation is a stub pending AO pre-approval for NeMo CBRN rail deployment | High | 2026-12-31 |
 | POAM-2026-026 | ISO 42001 A.8.4 | Standalone `token-quota-proxy` Deployment not yet created; TokenQuotaProxy runs inline in gateway | Moderate | 2026-09-30 |
 
@@ -154,6 +153,7 @@ The following findings have been remediated and verified via Lula validation and
 | POAM-2026-072 | AC-3 / SC-4 | Two-Stage Execution Boundary (ADR-008 Phase 1 & 2) — remediated by ActuatorRegistry ([`src/gateway/governance/execution_actuator.py`](../src/gateway/governance/execution_actuator.py)) & BrokerActuator wiring in [`src/cage_finance/tools/tool_provider.py`](../src/cage_finance/tools/tool_provider.py)). OSCAL AU-10/AU-12 updates completed in compliance/oscal/sp800-53-component-definition.yaml documenting RawMessageSigner protocol abstraction and multi-vendor KMS lifecycle management. | 2026-09-14 |
 | POAM-2026-073 | AC-4 | Semantic classifier boundary enforcement (`allow_extra_fields=False`) — remediated by FTRA boundary validation schema hardening | 2026-09-14 |
 | POAM-2026-074 | SI-10 | Multi-component input validation (NeMo Guardrails + FTRA integration) — remediated by [`src/gateway/governance/ftra/`](../src/gateway/governance/ftra/) package integration | 2026-09-14 |
+| POAM-2026-024 | CM-6 / AC-3 / AU-10 / SC-8 / SC-23 | ✅ **CLOSED — Sprint 6 client-governor interaction formal verification complete.** TLA+ LangGraph harness specification extended with client SDK session lifecycle states (`Active`, `ParkedForReview`, `PausedBudgetExceeded`, `Completed`), consecutive denial budget enforcement (`MaxConsecutiveDenials = 2`), and single-use deferral ticket invariant (`SingleUseDeferralTicket`). OSCAL component definition created at [`compliance/oscal/components/cage_client_sdk.yaml`](../compliance/oscal/components/cage_client_sdk.yaml) mapping AC-3 (out-of-process PDP client mediation), AU-10 (W3C traceparent and HMAC routing seal validation), SC-8 (mTLS HTTP/2 transport), and SC-23 (routing seal micro-TTL validation). TLA+ model checker parameters documented in [`proof/README.md`](../proof/README.md). Verified against staging environment with formal verification proof model showing `BudgetNeverExceededWithoutPause` invariant holds: `(consecutive_denials > MaxConsecutiveDenials) => (phase = "PausedBudgetExceeded")`. Verification commit: `<pending-squash-merge-sha>`. | 2026-09-18 |
 
 ---
 

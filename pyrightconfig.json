@@ -1,0 +1,21 @@
+{
+  "include": [
+    "src",
+    "scripts",
+    "examples"
+  ],
+  "exclude": [
+    "tests",
+    "**/__pycache__",
+    "**/.venv*",
+    "**/node_modules",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".hypothesis", "**/.*", ".venv", ".venv-1"
+  ],
+  "reportMissingTypeStubs": false,
+  "reportGeneralTypeIssues": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux"
+}

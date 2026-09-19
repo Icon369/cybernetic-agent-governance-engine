@@ -74,7 +74,9 @@ class AgentState(TypedDict):
     loop_count: int | None  # Track recursion depth for Safety Breaker
 
     # Safety & Optimization Control
-    safety_status: Literal["APPROVED", "BLOCKED", "ESCALATED", "SKIPPED"]
+    safety_status: Literal[
+        "APPROVED", "BLOCKED", "ESCALATED", "SKIPPED", "DEFERRED", "HARD_PAUSE_BUDGET_EXCEEDED"
+    ]
     governance_signature: str | None  # Cryptographic-style approval from Evaluator
 
     # User Profile
@@ -164,3 +166,21 @@ class AgentState(TypedDict):
     #                     "HITL review required for high-value transaction"
     pause_resume_token: str | None  # default None
     pause_reason: str | None  # default None
+
+    # Policy-Probing Attack Mitigation (ADR-008 Enforcement)
+    # consecutive_denials: Counter of sequential DENY verdicts without ALLOW reset.
+    #                      Incremented on PolicyViolationException, reset to 0 on ALLOW.
+    #                      When >= MAX_CONSECUTIVE_DENIALS (2), graph halts with
+    #                      HARD_PAUSE_BUDGET_EXCEEDED to prevent replanning loops.
+    # last_violation:      Structured violation details from the most recent
+    #                      PolicyViolationException, used for self-correction prompts.
+    consecutive_denials: int  # default 0
+    last_violation: dict[str, Any] | None  # default None
+
+    # Deferral Ticket Management (DeferralPending Exception Handling)
+    # deferral_ticket_id: Unique ticket ID from DeferralPending exception when action
+    #                     requires human-in-the-loop approval via DeferQueue.
+    # deferral_reason:    Human-readable justification for the deferral, e.g.:
+    #                     "High-value trade requires manual approval (value: $50,000)".
+    deferral_ticket_id: str | None  # default None
+    deferral_reason: str | None  # default None

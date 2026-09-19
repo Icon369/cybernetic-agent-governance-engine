@@ -96,7 +96,7 @@ PROVED:
 |-----------|-------|------------|
 | `DistributedCBF.tla` | Multi-agent Redis CBF barrier, fence epochs, split-brain scenarios | `SP1_NoDoubleSpend`, `SP2_ReserveNonNegative`, `SP3_AvailableNonNegative`, `SP4_FenceEpochMonotonic` |
 | `FtraBoundary.tla` | FTRA action classification, controller boundary coverage, fail-closed semantics | `ControllerBoundaryCoversInGraphBypass`, `FailClosedOnUnknownAction`, `NetworkPolicyEnforced` |
-| `LangGraphHarness.tla` | LangGraph state machine, evidence chain, seal issuance, HITL timeout safety | `NoDirectBind`, `EvidenceChainIntegrity`, `SealGateIntegrity`, `HITLTimeoutSafety`, `OutputRailCoverage` |
+| `LangGraphHarness.tla` | LangGraph state machine, evidence chain, seal issuance, HITL timeout safety, client SDK session lifecycle | `NoDirectBind`, `EvidenceChainIntegrity`, `SealGateIntegrity`, `HITLTimeoutSafety`, `OutputRailCoverage`, `SingleUseDeferralTicket`, `BudgetNeverExceededWithoutPause` |
 
 ### TLA+ Config Files
 
@@ -120,6 +120,53 @@ INVARIANTS
     SP2_ReserveNonNegative
     SP3_AvailableNonNegative
     SP4_FenceEpochMonotonic
+
+CHECK_DEADLOCK TRUE
+```
+
+### LangGraph Harness Model Checker Parameters
+
+The `LangGraphHarness.tla` specification extends the governance pipeline model to include client SDK session lifecycle and budget enforcement:
+
+**Constants:**
+- `MaxLoopCount = 3` — Safety breaker cap for re-planning loops
+- `HITLTimeoutTicks = 5` — HITL TTL expiration countdown (abstract time units)
+- `MaxConsecutiveDenials = 2` — Budget cap for consecutive DENY verdicts before pausing session
+
+**Invariants:**
+- `TypeOK` — Type safety for all state variables
+- `NoDirectBind` — Core safety: `(phase = "RESPONSE") => resolved_allow`
+- `EvidenceChainIntegrity` — Audit trail committed before response
+- `SealGateIntegrity` — Routing seal issued and valid for ALLOW responses
+- `HITLTimeoutSafety` — HITL timeout leads to ERROR, not RESPONSE
+- `OutputRailCoverage` — All non-error paths pass through output rail
+- `SingleUseDeferralTicket` — Deferral tickets cannot be resolved more than once
+- `BudgetNeverExceededWithoutPause` — `consecutive_denials > MaxConsecutiveDenials` implies `phase = "PausedBudgetExceeded"`
+
+**Client SDK State Transitions:**
+- `TriggerDenial: Active → ParkedForReview` — Session parked after DENY verdict
+- `TriggerDeferral: Active → DEFER_PENDING` — Session deferred for data hydration
+- `ResumeApproval: ParkedForReview → Active` — Session resumes after manual approval
+- `ExceedBudget: Active → PausedBudgetExceeded` — Budget exhausted after MaxConsecutiveDenials
+
+**Model Configuration:**
+```
+SPECIFICATION Spec
+
+CONSTANTS
+    MaxLoopCount = 3
+    HITLTimeoutTicks = 5
+    MaxConsecutiveDenials = 2
+
+INVARIANTS
+    TypeOK
+    NoDirectBind
+    EvidenceChainIntegrity
+    SealGateIntegrity
+    HITLTimeoutSafety
+    OutputRailCoverage
+    SingleUseDeferralTicket
+    BudgetNeverExceededWithoutPause
 
 CHECK_DEADLOCK TRUE
 ```
