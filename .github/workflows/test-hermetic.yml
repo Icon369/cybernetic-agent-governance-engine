@@ -30,18 +30,25 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   hermetic-test:
     name: Hermetic Governance Pipeline Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      CAGE_ENV: test
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
 
@@ -55,7 +62,7 @@ jobs:
           # Install ONLY [gateway] and [compliance_bridge] extras
           # Explicitly EXCLUDE [advisor] which pulls sentence-transformers
           uv pip install --system -e ".[gateway,compliance_bridge]"
-          uv pip install --system pytest pytest-asyncio fakeredis respx httpx
+          uv pip install --system pytest pytest-asyncio pytest-xdist pytest-timeout "fakeredis[lua]" respx httpx pandas freezegun
 
       - name: Verify ML packages are NOT installed
         run: |
@@ -76,12 +83,18 @@ jobs:
           echo "::endgroup::"
 
       - name: Run hermetic governance pipeline tests
+        env:
+          CAGE_ACTIVE_PLUGINS: "finance"
         run: |
           # Run core governance tests WITHOUT any ML dependencies
           # This proves Stage 2.5 is truly optional
-          pytest tests/ \
+          pytest \
+            tests/test_cbf_*.py \
+            tests/test_symbolic_governor*.py \
+            tests/test_routing_seal*.py \
+            tests/test_governance_envelope.py \
+            tests/test_consequence_gateway*.py \
             -m "local or unit" \
-            -k "symbolic_governor or cbf or routing_seal or governance_envelope or consequence_gateway" \
             --tb=short \
             -v \
             --no-cov \
