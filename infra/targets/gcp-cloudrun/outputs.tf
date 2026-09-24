@@ -156,3 +156,25 @@ output "gateway_dns_record" {
   description = "DNS record name configured in Cloud DNS (only when enable_cloud_dns=true)"
   value       = var.enable_cloud_dns && var.dns_zone_name != "" && var.enable_load_balancer ? google_dns_record_set.gateway[0].name : null
 }
+
+# ─── CMEK & Binary Authorization ──────────────────────────────────────────────
+
+output "kms_key_ring_id" {
+  description = "KMS key ring ID for CMEK (only when enable_cmek=true)"
+  value       = var.enable_cmek ? google_kms_key_ring.cloudrun_keyring[0].id : null
+}
+
+output "kms_crypto_key_id" {
+  description = "KMS crypto key ID for CMEK (only when enable_cmek=true)"
+  value       = var.enable_cmek ? google_kms_crypto_key.cloudrun_cmek[0].id : null
+}
+
+output "binary_authorization_policy_id" {
+  description = "Binary Authorization policy ID (only when enable_binary_authorization=true)"
+  value       = var.enable_binary_authorization ? google_binary_authorization_policy.cloudrun_policy[0].id : null
+}
+
+output "attestor_name" {
+  description = "Binary Authorization attestor name (only when enable_binary_authorization=true)"
+  value       = var.enable_binary_authorization ? google_binary_authorization_attestor.cloudrun_attestor[0].name : null
+}
