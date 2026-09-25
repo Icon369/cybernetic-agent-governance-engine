@@ -296,10 +296,14 @@ class TestHealthAndDiscovery:
         assert r.status_code == 200, "/docs (Swagger UI) must be reachable on GKE"
 
     def test_controls_endpoint_returns_all_supported(self, session):
+        """Endpoint returns region-filtered controls based on CAGE_DEPLOYMENT_REGION."""
         data = session.get(f"{BASE_URL}/v1/controls", timeout=10).json()
         assert "controls" in data
         assert data["total"] >= 8
         ids = {c["control_id"] for c in data["controls"]}
+
+        # Expected controls based on active jurisdictional posture (CAGE_DEPLOYMENT_REGION),
+        # NOT physical cluster location. Staging clusters can test any regional framework.
         universal_expected = [
             "A.5.2",
             "A.5.3",
@@ -308,14 +312,17 @@ class TestHealthAndDiscovery:
             "A.9.2",
             "SC-4",
         ]
-        if _REGION == "EU_ECB":
-            expected_controls = universal_expected + ["Article 12", "Article 13"]
-        elif _REGION == "APAC_MAS":
-            expected_controls = universal_expected + ["MAS-FEAT-1"]
-        else:
-            expected_controls = universal_expected + ["SC-7", "SC-8"]
+        active_region = data.get("deployment_region") or _REGION
+        if active_region == "EU_ECB":
+            expected_controls = [*universal_expected, "Article 12", "Article 13"]
+        elif active_region == "APAC_MAS":
+            expected_controls = [*universal_expected, "MAS-FEAT-1"]
+        else:  # US_FED or unset
+            expected_controls = [*universal_expected, "SC-7", "SC-8"]
         for expected in expected_controls:
-            assert expected in ids, f"{expected} missing from /v1/controls"
+            assert expected in ids, (
+                f"{expected} missing from /v1/controls for CAGE_DEPLOYMENT_REGION={active_region}"
+            )
 
     def test_controls_schema(self, session):
         controls = session.get(f"{BASE_URL}/v1/controls", timeout=10).json()["controls"]

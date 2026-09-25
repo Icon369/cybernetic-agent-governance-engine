@@ -72,7 +72,7 @@ Compliance obligations (Cat-M change — AO pre-approval required)
 - AC-3  (Access Enforcement): gRPC endpoint must only accept calls from the
   registered proxy service account (enforced by mTLS CN/SAN validation).
 - AU-2  (Audit Events): every CheckRequest/CheckResponse is logged via the
-  existing OTel/Langfuse pipeline.
+  existing OTel/Telemetry pipeline.
 - SI-10 (Information Input Validation): JSON-RPC body parser validates
   structure before passing to validate_action().
 - OSCAL component update in compliance/oscal/ required within 2 business days
@@ -1129,7 +1129,29 @@ class CAGEAuthorizationServicer:
             # Extract caller principal from mTLS peer certificate (SC-8 / AC-3)
             # The peer principal is set by the service mesh from the SPIFFE ID
             # in the client certificate's SAN field.
-            caller_principal: str = request.attributes.source.principal or ""
+            # Validate it's a proper SPIFFE URI and fail closed if missing.
+            from src.gateway.governance.spiffe_extractor import (
+                extract_spiffe_uri_from_grpc_context,
+            )
+
+            try:
+                caller_principal = extract_spiffe_uri_from_grpc_context(
+                    request.attributes
+                )
+            except Exception as spiffe_exc:
+                logger.error(
+                    "AgentGatewayAdapter: SPIFFE extraction failed: %s — fail-closed",
+                    spiffe_exc,
+                )
+                response_dict = _build_denied_response(
+                    401,
+                    {
+                        "error": "authentication_required",
+                        "message": "Client certificate with valid SPIFFE URI required",
+                        "detail": str(spiffe_exc),
+                    },
+                )
+                return _dict_to_check_response(response_dict)
         except Exception as exc:
             logger.warning(
                 "AgentGatewayAdapter: failed to extract request fields: %s — fail-closed",

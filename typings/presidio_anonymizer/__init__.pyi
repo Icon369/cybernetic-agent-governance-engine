@@ -1,4 +1,5 @@
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 class EngineResult:
     text: str
@@ -11,4 +12,3 @@ class AnonymizerEngine:
         analyzer_results: Sequence[Any],
         **kwargs: Any,
     ) -> EngineResult: ...
-

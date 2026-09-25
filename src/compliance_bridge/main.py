@@ -426,7 +426,7 @@ async def health() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/controls  (Tier 1.2)
+# GET /v1/controls  (Service Group 1.2)
 #
 # Discovery endpoint — returns the registry of supported controls filtered by
 # CAGE_DEPLOYMENT_REGION.  Avoids callers (Lula, agentsight-ui) hard-coding
@@ -548,7 +548,7 @@ async def list_controls(
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/metrics/summary  (Tier 2.6)
+# GET /v1/metrics/summary  (Service Group 2.6)
 #
 # Aggregate endpoint — returns compliance posture across ALL supported controls
 # in a single response.  Eliminates the need for N individual /v1/metrics calls
@@ -769,16 +769,55 @@ def _build_cer_index() -> CERIndex | None:
 
     try:
         # Function-scope lazy import (Gate G3 allowlisted pattern)
+        from src.compliance_bridge.disclosure import Disclosure
         from src.integrations.provider_02.cer_index import Provider02CERIndex
 
-        # For now, construct with empty mappings — B2 resolver integration
-        # will populate these dynamically. This wiring proves the plumbing works.
+        cer_uris: dict[str, str] = {}
+        raw_uris = os.environ.get("PROVIDER_02_CER_URIS_JSON", "").strip()
+        if raw_uris:
+            try:
+                parsed_uris = json.loads(raw_uris)
+                if isinstance(parsed_uris, dict):
+                    cer_uris = {str(k): str(v) for k, v in parsed_uris.items()}
+            except Exception as parse_err:
+                logger.warning(
+                    "[cer-index] Failed to parse PROVIDER_02_CER_URIS_JSON: %s",
+                    parse_err,
+                )
+
+        disclosure_policies: dict[str, Disclosure] = {}
+        raw_policies = os.environ.get("PROVIDER_02_DISCLOSURE_POLICIES_JSON", "").strip()
+        if raw_policies:
+            try:
+                parsed_policies = json.loads(raw_policies)
+                if isinstance(parsed_policies, dict):
+                    for k, v in parsed_policies.items():
+                        try:
+                            disclosure_policies[str(k)] = Disclosure(str(v).lower())
+                        except (ValueError, KeyError):
+                            try:
+                                disclosure_policies[str(k)] = Disclosure[str(v).upper()]
+                            except Exception:
+                                logger.warning(
+                                    "[cer-index] Unknown disclosure policy '%s' for control '%s'",
+                                    v,
+                                    k,
+                                )
+            except Exception as parse_err:
+                logger.warning(
+                    "[cer-index] Failed to parse PROVIDER_02_DISCLOSURE_POLICIES_JSON: %s",
+                    parse_err,
+                )
+
         index = Provider02CERIndex(
-            cer_uris={},
-            disclosure_policies={},
+            cer_uris=cer_uris,
+            disclosure_policies=disclosure_policies,
         )
         logger.info(
-            "[cer-index] Provider02CERIndex constructed (resolver: %s)", resolver_url
+            "[cer-index] Provider02CERIndex constructed (resolver: %s, uris: %d, policies: %d)",
+            resolver_url,
+            len(cer_uris),
+            len(disclosure_policies),
         )
         return index
     except Exception as exc:
@@ -791,7 +830,7 @@ def _build_cer_index() -> CERIndex | None:
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/oscal/assessment-results  (Tier 2.3)
+# GET /v1/oscal/assessment-results  (Service Group 2.3)
 #
 # Generates a standards-compliant OSCAL 1.1.2 Assessment Results document
 # from the current compliance posture.  Closes the loop with Lula — Lula can
@@ -903,7 +942,7 @@ async def export_oscal_assessment_results(
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/audit/status/{audit_id}  (Tier 1.3)
+# GET /v1/audit/status/{audit_id}  (Service Group 1.3)
 #
 # Poll endpoint for async audit results.  POST /v1/audit/ingest stores results
 # here so callers can retrieve them after an async ingest.
@@ -1105,7 +1144,7 @@ async def audit_ingest(
             "remediation_sent": result["remediation_sent"],
             "remediation_text": result["remediation_text"],
             "advisor_error": result["advisor_error"],
-            # Per-control advisory breakdown (Tier 3.1). Empty list when
+            # Per-control advisory breakdown (Service Group 3.1). Empty list when
             # no LLM advisory was generated (VLLM_BASE_URL unset, etc.).
             "remediation_per_control": result.get("per_control", []),
             # CAGE v0.1.0 AARM fields
@@ -1743,14 +1782,44 @@ async def defer_escalate(
                     "defer_id": defer_id,
                 },
             )
+        elif status == ApprovalStatus.CONTENTION_ABORTED:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "CONTENTION_ABORTED",
+                    "message": "Concurrent approval contention detected. Retry this request.",
+                    "defer_id": defer_id,
+                },
+            )
+
+        # Safety guard: ensure token is not None for successful approvals
+        if token is None:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "INTERNAL_ERROR",
+                    "message": f"Unexpected approval state: {status.name} with no token",
+                    "defer_id": defer_id,
+                },
+            )
 
         # Determine response based on approval status
         if status == ApprovalStatus.QUORUM_REACHED:
             response_status = "escalated"
             event_type = "DEFER_RESOLVED"
-        else:  # PARTIAL_QUORUM
+        elif status == ApprovalStatus.PARTIAL_QUORUM:
             response_status = "partially_approved"
             event_type = "DEFER_PARTIALLY_APPROVED"
+        else:
+            # Unreachable: all known statuses handled above
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "INTERNAL_ERROR",
+                    "message": f"Unexpected approval status: {status.name}",
+                    "defer_id": defer_id,
+                },
+            )
 
     except HTTPException:
         raise

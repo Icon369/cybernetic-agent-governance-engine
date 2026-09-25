@@ -47,7 +47,6 @@ This starts:
 - **Gateway** (`localhost:8080`) — Gateway: 8080 (REST Ingress / FastMCP over SSE / In-Process Tier Pipeline)
 - **Governed Application (`app`)** (`localhost:3000`) — Governed application service container
 - **OPA** (`localhost:8181`) — Policy engine with Rego authorization policies
-- **SLM Sidecar** (`localhost:5000`) — Sentence-transformers similarity scoring service
 
 ## 3. Verify the gateway is running
 
@@ -89,6 +88,8 @@ Navigate to `http://localhost:5173` to see:
 ```bash
 uv run pytest tests/ -m "local or unit" -n auto --dist loadscope --no-cov -p no:langsmith -p no:langsmith_plugin --tb=short
 ```
+
+> **Local Development Postures:** For details on developing with the offline hermetic test loop vs. the full containerized LangGraph SDK runtime with host Ollama, see [`docs/guides/LOCAL_DEVELOPMENT_POSTURES.md`](guides/LOCAL_DEVELOPMENT_POSTURES.md).
 
 ## 7. Confirm the substrate is domain-independent
 

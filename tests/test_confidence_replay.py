@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -60,11 +60,31 @@ def _make_fake_redis() -> MagicMock:
 
     redis = MagicMock()
 
-    async def _hset(key: str, mapping: dict) -> None:
-        store.setdefault(key, {}).update(mapping)
+    async def _hset(key: str, field_or_mapping=None, value=None) -> None:
+        """Support both hset(key, mapping) and hset(key, field, value)."""
+        if value is not None:
+            # Individual field/value pair: hset(key, field, value)
+            store.setdefault(key, {})[field_or_mapping] = value
+        elif isinstance(field_or_mapping, dict):
+            # Mapping form: hset(key, {field1: val1, ...})
+            store.setdefault(key, {}).update(field_or_mapping)
 
     async def _hget(key: str, field: str) -> str | None:
         return store.get(key, {}).get(field)
+
+    async def _hmget(key: str, *fields: str) -> list[str | None]:
+        """Return values for multiple fields as a list."""
+        hash_data = store.get(key, {})
+        return [hash_data.get(field) for field in fields]
+
+    async def _hsetnx(key: str, field: str, value: str) -> int:
+        """Set field in hash only if it doesn't exist."""
+        if key not in store:
+            store[key] = {}
+        if field not in store[key]:
+            store[key][field] = value
+            return 1
+        return 0
 
     async def _hdel(key: str, *fields: str) -> None:
         for f in fields:
@@ -103,8 +123,17 @@ def _make_fake_redis() -> MagicMock:
         def __init__(self) -> None:
             self._ops: list[tuple] = []
 
-        def hset(self, key: str, mapping: dict) -> FakePipeline:
-            self._ops.append(("hset", key, mapping))
+        def hset(self, key: str, field_or_mapping=None, value=None) -> FakePipeline:
+            """Support both hset(key, mapping) and hset(key, field, value)."""
+            if value is not None:
+                # Individual field/value pair: hset(key, field, value)
+                self._ops.append(("hset", key, {field_or_mapping: value}))
+            elif isinstance(field_or_mapping, dict):
+                # Mapping form: hset(key, {field1: val1, ...})
+                self._ops.append(("hset", key, field_or_mapping))
+            else:
+                # Legacy positional form
+                self._ops.append(("hset", key, field_or_mapping))
             return self
 
         def expire(self, key: str, ttl: int) -> FakePipeline:
@@ -143,6 +172,8 @@ def _make_fake_redis() -> MagicMock:
 
     redis.hset = _hset
     redis.hget = _hget
+    redis.hmget = _hmget
+    redis.hsetnx = _hsetnx
     redis.hdel = _hdel
     redis.delete = _delete
     redis.exists = _exists
@@ -150,6 +181,31 @@ def _make_fake_redis() -> MagicMock:
     redis.zrangebyscore = _zrangebyscore
     redis.zrem = _zrem
     redis.pipeline = lambda transaction=True: FakePipeline()
+
+    # Lua script support for CAS operations — simulate the CAS Lua script
+    # in-process so that _resolve() actually writes token/status/rev to store.
+    redis.script_load = AsyncMock(return_value="mock-sha")
+
+    async def _evalsha(
+        sha: str,
+        num_keys: int,
+        key: str,
+        expected_rev: str,
+        token_json: str,
+        new_status: str,
+    ) -> list:
+        """Simulate the CAS Lua script: compare rev, then write token+status+rev."""
+        current_rev_raw = store.get(key, {}).get("rev")
+        current_rev = current_rev_raw if current_rev_raw is not None else "0"
+        if str(current_rev) != str(expected_rev):
+            return [0, int(current_rev)]
+        new_rev = int(current_rev) + 1
+        store.setdefault(key, {}).update(
+            {"token": token_json, "status": new_status, "rev": str(new_rev)}
+        )
+        return [1, new_rev]
+
+    redis.evalsha = _evalsha
 
     # Expose the raw store dict so tests can inspect Redis state directly.
     redis._store = store

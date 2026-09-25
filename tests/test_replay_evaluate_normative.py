@@ -55,12 +55,33 @@ def fake_redis():
     redis = MagicMock()
 
     # hset
-    async def _hset(key: str, mapping: dict):
-        store.setdefault(key, {}).update(mapping)
+    async def _hset(key: str, field_or_mapping=None, value=None):
+        """Support both hset(key, mapping) and hset(key, field, value)."""
+        if value is not None:
+            # Individual field/value pair: hset(key, field, value)
+            store.setdefault(key, {})[field_or_mapping] = value
+        elif isinstance(field_or_mapping, dict):
+            # Mapping form: hset(key, {field1: val1, ...})
+            store.setdefault(key, {}).update(field_or_mapping)
 
     # hget
     async def _hget(key: str, field: str):
         return store.get(key, {}).get(field)
+
+    # hmget
+    async def _hmget(key: str, *fields: str):
+        hash_data = store.get(key, {})
+        return [hash_data.get(field) for field in fields]
+
+    # hsetnx
+    async def _hsetnx(key: str, field: str, value: str):
+        """Set field in hash only if it doesn't exist."""
+        if key not in store:
+            store[key] = {}
+        if field not in store[key]:
+            store[key][field] = value
+            return 1
+        return 0
 
     # expire (no-op in mock — TTL not enforced in unit tests)
     async def _expire(key: str, ttl: int):
@@ -89,8 +110,17 @@ def fake_redis():
         def __init__(self):
             self._ops = []
 
-        def hset(self, key, mapping):
-            self._ops.append(("hset", key, mapping))
+        def hset(self, key, field_or_mapping=None, value=None):
+            """Support both hset(key, mapping) and hset(key, field, value)."""
+            if value is not None:
+                # Individual field/value pair: hset(key, field, value)
+                self._ops.append(("hset", key, {field_or_mapping: value}))
+            elif isinstance(field_or_mapping, dict):
+                # Mapping form: hset(key, {field1: val1, ...})
+                self._ops.append(("hset", key, field_or_mapping))
+            else:
+                # Legacy positional form
+                self._ops.append(("hset", key, field_or_mapping))
             return self
 
         def expire(self, key, ttl):
@@ -128,11 +158,38 @@ def fake_redis():
 
     redis.hset = _hset
     redis.hget = _hget
+    redis.hmget = _hmget
+    redis.hsetnx = _hsetnx
     redis.expire = _expire
     redis.zadd = _zadd
     redis.zrangebyscore = _zrangebyscore
     redis.zrem = _zrem
     redis.pipeline = _pipeline
+
+    # Lua script support for CAS operations — simulate the CAS Lua script
+    # in-process so that _resolve() actually writes token/status/rev to store.
+    redis.script_load = AsyncMock(return_value="mock-sha")
+
+    async def _evalsha(
+        sha: str,
+        num_keys: int,
+        key: str,
+        expected_rev: str,
+        token_json: str,
+        new_status: str,
+    ) -> list:
+        """Simulate the CAS Lua script: compare rev, then write token+status+rev."""
+        current_rev_raw = store.get(key, {}).get("rev")
+        current_rev = current_rev_raw if current_rev_raw is not None else "0"
+        if str(current_rev) != str(expected_rev):
+            return [0, int(current_rev)]
+        new_rev = int(current_rev) + 1
+        store.setdefault(key, {}).update(
+            {"token": token_json, "status": new_status, "rev": str(new_rev)}
+        )
+        return [1, new_rev]
+
+    redis.evalsha = _evalsha
 
     # watch/unwatch for approval tests
     redis.watch = AsyncMock()

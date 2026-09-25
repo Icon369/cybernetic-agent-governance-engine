@@ -22,6 +22,29 @@ Domain specificity and jurisdictional compliance are **configuration, not core r
 
 ---
 
+## What's New in v3.1.0
+
+> **Release date:** 2026-09-22 — Zero-Trust Identity & Egress: agent identity moves from the application layer to the transport layer, and outbound credentials move from adapter-held secrets to a brokered, SVID-scoped seam.
+> See [CHANGELOG.md](CHANGELOG.md#310---2026-09-22) and [docs/BREAKING_CHANGES_v3.md](docs/BREAKING_CHANGES_v3.md) for the migration guide.
+
+> [!WARNING]
+> **Breaking change.** `X-Agent-ID` / `X-SPIFFE-ID` header parsing and the anonymous
+> fallback are removed. Callers must present a mesh-issued mTLS client certificate
+> carrying a SPIFFE URI SAN; unauthenticated requests fail closed with **401**
+> `authentication_required` on both the HTTP and ext_authz/gRPC paths. No
+> compatibility shim is provided — the removed path was a
+> spoofing vector.
+
+| Capability | Location | Description |
+|---|---|---|
+| **Native SPIFFE Identity Extraction** | `src/gateway/governance/spiffe_extractor.py` | Agent identity is read exclusively from the verified mTLS client certificate SAN on both ASGI and gRPC ingress. Header- and body-supplied identity is ignored; there is no anonymous principal. |
+| **DPoP Proof-of-Possession (RFC 9449)** | `src/gateway/server/dpop_validator.py` | Vendor-neutral `ProofOfPossessionValidator` protocol and pure-Python `DPoPValidator` binding tokens to the client certificate thumbprint. Unit-tested; **not yet wired into an ingress path**. |
+| **Declarative A2A Authorization** | `config/opa/agent_catalog.rego` | Subagents declare `authorized_parent_prefixes`; OPA authorizes via `startswith()` prefix matching, keeping ephemeral instance IDs out of policy bodies. |
+| **Egress Credential Broker Seam** | `src/gateway/governance/seams/credential_broker.py` | Layer 1 holds the `CredentialBrokerAdapter` protocol; the Layer 3 reference actuator invokes it as a pre-dispatch gate keyed on agent SVID and tool name, masks values in logs, keeps them out of the audit record, and fails closed on denial. |
+| **CAGE Guard for LangGraph** | `packages/cage-client/` | Governance enforcement wrapped around LangGraph nodes via the CAGE Client SDK. |
+
+---
+
 ## What's New in v3.0.1
 
 > **Release date:** 2026-09-07 — Major Version Release: Domain-agnostic kernel extraction, Layer 1/Layer 2 separation, architectural cleanup, formal safety consolidations, governed threshold centralization, and 6-primitive governance runtime.
@@ -55,6 +78,7 @@ Domain specificity and jurisdictional compliance are **configuration, not core r
 
 | Suite / Jurisdiction | Posture | Result | Date |
 |---|---|---|---|
+| **Universal / Unit Suite (v3.1.0)** | `test` (offline, `make test-fast`) | ✅ **4,347 passed** / 0 failed / 122 skipped / 6 subtests passed | 2026-09-22 |
 | **Universal / Unit Suite** | `test` (offline) | ✅ **3,921 passed** / 0 failed / 82 skipped (4,148 total collected) | 2026-09-09 |
 | **US_FED** (NIST SP 800-53 / FedRAMP) | `dev` / `test` | ✅ **3,747 passed** / 0 failed / 67 skipped (75.40% cov) | 2026-09-03 |
 | **US_FED** (NIST SP 800-53 / FedRAMP) | `prod` | ✅ **217 passed** / 0 failed / 131 skipped | 2026-09-03 |
@@ -75,6 +99,7 @@ CAGE is a **Kubernetes-native, cloud-agnostic** AI governance engine. The core g
 | Deployment Target | Kubernetes | Cloud Provider | Status |
 |---|---|---|---|
 | GKE (Google Kubernetes Engine) | ✅ Any GKE channel | GCP (optional integrations) | Production-ready |
+| Cloud Run (Serverless) | N/A (Serverless Containers) | GCP | Phase A+B Hardened |
 | EKS (Amazon Elastic Kubernetes Service) | ✅ Any EKS version | AWS (optional integrations) | Supported |
 | AKS (Azure Kubernetes Service) | ✅ Any AKS version | Azure (optional integrations) | Supported |
 | OpenShift | ✅ 4.12+ | On-prem / any cloud | Supported |
@@ -219,6 +244,8 @@ CAGE is composed of the following runtime subsystems:
 | **Consequence Gateway**          | **L1** | `src/gateway/governance/`         | 6-step token evaluation, JWS verification, and authority store — see [`CONSEQUENCE_GATEWAY.md`](docs/architecture/CONSEQUENCE_GATEWAY.md) |
 | **FTRA Reachability Analyzer**   | **L1** | `src/gateway/governance/ftra/`    | Irreversibility classification and graph bounding — see [`FTRA_REACHABILITY_ANALYZER.md`](docs/architecture/FTRA_REACHABILITY_ANALYZER.md) |
 | **Cryptographic Signer Engine**  | **L1** | `src/gateway/governance/`         | Cloud KMS provider, RFC 8785 JCS canonicalization, and JWKS resolution — see [`CRYPTOGRAPHIC_SIGNER_ENGINE.md`](docs/architecture/CRYPTOGRAPHIC_SIGNER_ENGINE.md) |
+| **Ingress Identity Boundary**    | **L1** | `src/gateway/governance/spiffe_extractor.py`, `src/gateway/server/dpop_validator.py` | SPIFFE SVID extraction from the verified mTLS client certificate SAN (ASGI + gRPC), fail-closed 401 on both paths. An RFC 9449 DPoP validator ships but is not yet wired into ingress — see [`AGENT_IDENTITY_BINDING_SPEC.md`](docs/architecture/AGENT_IDENTITY_BINDING_SPEC.md) |
+| **Seam Contracts**               | **L1** | `src/gateway/governance/seams/`   | Zero-kernel-import protocols for external adapters: `normative.py`, `attestation.py`, `actuation.py`, `graph_topology.py`, `credential_broker.py` |
 | **Compliance Bridge**            | **L3** | `src/compliance_bridge/`          | OSCAL audit ingest; SSE event bus; Langfuse integration; AARM Conformance Engine; DEFER Queue API; infrastructure telemetry to ClickHouse |
 | **Vendor Integrations**          | **L3** | `src/integrations/`               | Isolated third-party adapters: `provider_01/` (normative provider), `provider_02/` (CER attestation), `provider_03/` (JCS canonicalization), `actuator_01/` (execution actuator), `provider_05/` (Verifiable Execution Evidence Pack), `provider_06/` (tri-state verifier), `storage_gcs/` (GCS durable sink), `storage_s3/` (S3 durable sink) |
 | **Domain Plugins** *(optional)*  | **L2** | `src/cage_finance/`, `src/cage_healthcare/` | Entry-point (`cage.plugins`) capability packages contributing domain-specific tiers, barriers, rails, tools, and compliance overlays. Finance and healthcare are equal-standing example domains; adopters add `src/cage_<domain>/`. **Zero plugins loaded:** kernel denies all domain actions (fail-closed) |
@@ -298,6 +325,179 @@ User ──FastMCP over SSE──► Gateway Transport (:8080)
 An equivalent **Healthcare Clinical Agent demo** path traverses the identical substrate, substituting `dose_order` for `execute_trade`, `SerumConcentrationBarrier` for `CashBarrier`, and clinical critics for market critics — with **no kernel change**. Both reference applications demonstrate that CAGE's governance mechanisms are completely domain-agnostic. Any adopter domain follows the same substitution pattern.
 
 For full architectural detail, see [`docs/architecture/GATEWAY_ARCHITECTURE.md`](docs/architecture/GATEWAY_ARCHITECTURE.md), the [Technology Stack](docs/architecture/TECH_STACK.md), the [Multi-Agent System Architecture](docs/architecture/AGENT_SYSTEM_ARCHITECTURE.md), and the [Extensibility Architecture](docs/architecture/EXTENSIBILITY_ARCHITECTURE.md) (domain-agnostic kernel design and multi-domain roadmap). Four subsystem deep-dives cover the enforcement substrate in detail: [Symbolic Governor Runtime](docs/architecture/SYMBOLIC_GOVERNOR_RUNTIME.md), [Consequence Gateway](docs/architecture/CONSEQUENCE_GATEWAY.md), [FTRA Reachability Analyzer](docs/architecture/FTRA_REACHABILITY_ANALYZER.md), and [Cryptographic Signer Engine](docs/architecture/CRYPTOGRAPHIC_SIGNER_ENGINE.md).
+
+---
+
+## Using CAGE with LangGraph
+
+CAGE provides **governance-as-a-service for LangGraph applications** through the lightweight **`cage-client` SDK**. Install the client package, decorate your LangGraph nodes with `@cage_guard`, and all governance enforcement happens transparently.
+
+### Quick Start (3 Steps)
+
+#### 1. Install the Client SDK
+
+```bash
+pip install "cage-client[langgraph] @ git+https://github.com/google/cybernetic-agent-governance-engine.git#subdirectory=packages/cage-client"
+```
+
+Or with `uv`:
+```bash
+uv add "cage-client[langgraph] @ git+https://github.com/google/cybernetic-agent-governance-engine.git#subdirectory=packages/cage-client"
+```
+
+#### 2. Start CAGE Governance Services
+
+```bash
+# Clone CAGE repository (one-time setup)
+git clone https://github.com/google/cybernetic-agent-governance-engine.git
+cd cybernetic-agent-governance-engine
+
+# Start infrastructure: Gateway :8080, OPA :8181, Redis :6379
+docker compose up
+
+# Verify gateway health
+curl http://localhost:8080/health
+```
+
+#### 3. Decorate Your LangGraph Nodes
+
+```python
+from langgraph.graph import StateGraph
+from cage_client import CageClient
+from cage_client.adapters.langgraph import cage_guard
+
+# Initialize client (once at app startup)
+cage = CageClient(
+    gateway_url="http://localhost:8080",
+    routing_seal_secret="dev-secret-key",  # From .env
+)
+
+
+# Define your LangGraph workflow
+class AgentState(TypedDict):
+    query: str
+    proposed_action: dict  # Parameters for governed action
+    agent_id: str
+    result: str
+
+
+# Decorate high-stakes nodes with governance
+@cage_guard(client=cage, action="execute_trade")
+async def execute_trade_node(state: AgentState) -> AgentState:
+    # This node ONLY runs if CAGE Gateway returns ALLOW
+    trade = state["proposed_action"]
+    result = await execute_trade(**trade)
+    return {"result": f"Executed {trade}"}
+
+
+# Build graph (governance enforcement is transparent)
+graph = StateGraph(AgentState)
+graph.add_node("planner", plan_trade)
+graph.add_node("execute_trade", execute_trade_node)  # ← Governed node
+graph.add_edge("planner", "execute_trade")
+app = graph.compile()
+```
+
+**What happens at runtime:**
+1. LangGraph reaches the `execute_trade` node
+2. `@cage_guard` intercepts execution and calls `http://localhost:8080/v1/governance/validate`
+3. CAGE Gateway runs the 8-tier governance pipeline (STPA, OPA, CBF, Consensus, Causal, FRIA)
+4. **ALLOW** → Node executes; **DENY** → Raises [`PolicyViolationException`](packages/cage-client/src/cage_client/exceptions.py); **DEFER** → Raises [`DeferralPending`](packages/cage-client/src/cage_client/exceptions.py) for HITL parking
+
+### Architecture: Decoupled PEP/PDP Pattern
+
+```
+┌──────────────────────────────────┐
+│   Your LangGraph Application    │
+│   (pip install cage-client)      │
+│                                  │
+│   ┌──────────────────────────┐  │
+│   │ @cage_guard decorator    │──┼──► HTTP/2 ──► CAGE Gateway :8080
+│   │ (lightweight PEP client) │  │                (8-tier PDP pipeline)
+│   └──────────────────────────┘  │
+└──────────────────────────────────┘
+                                    
+         Dependencies installed via pip install cage-client[langgraph]
+         (httpx, pydantic, cryptography, langgraph)
+
+┌─────────────────────────────────────────────┐
+│  CAGE Governance Stack (docker compose up)  │
+│                                             │
+│  Gateway :8080  ──► OPA :8181               │
+│                 ──► NeMo Guardrails         │
+│                 ──► Redis :6379 (CBF)       │
+│                 ──► Langfuse (optional)     │
+└─────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- **Zero boilerplate:** No manual REST calls, no envelope parsing
+- **Fail-closed by default:** Network errors → action blocked
+- **Cryptographic seals:** HMAC routing seals validated transparently
+- **W3C tracing:** Propagates `traceparent` for distributed traces
+- **Exception-driven:** Governance denials surface as typed Python exceptions for LangGraph error handlers
+
+### Client SDK Error Handling
+
+```python
+from cage_client.exceptions import PolicyViolationException, DeferralPending
+
+
+@graph.on_error
+async def handle_governance_error(state, error):
+    if isinstance(error, PolicyViolationException):
+        # Action denied by policy → route to replanning
+        return {
+            "next_node": "replan",
+            "violation": error.violation_details,
+            "reason": error.reason_code,
+        }
+
+    elif isinstance(error, DeferralPending):
+        # Action requires HITL → park checkpoint
+        return {
+            "next_node": "__interrupt__",
+            "ticket_id": error.ticket_id,
+            "resume_after": error.expires_at,
+        }
+
+    raise error  # Re-raise non-governance errors
+```
+
+### Alternative Integration: Node Factories (Advanced)
+
+For users building governance **into** the CAGE monorepo itself (not consuming it as a library), node factories are available:
+
+```python
+from src.gateway.governance.langgraph_harness import (
+    create_opa_safety_node,
+    create_nemo_guardrail_node,
+)
+
+graph.add_node("input_rail", create_nemo_guardrail_node(rail_type="input"))
+graph.add_node("safety_check", create_opa_safety_node(policy_path="trade_governance"))
+```
+
+**Use node factories when:** You're extending CAGE's kernel or building domain plugins ([`src/cage_finance/`](src/cage_finance/), [`src/cage_healthcare/`](src/cage_healthcare/))
+
+**Use `cage-client` when:** You're building a standalone LangGraph app that consumes CAGE as a service (recommended for 95% of users)
+
+### Complete Examples
+
+| Example | Integration Method | Path |
+|---------|-------------------|------|
+| **Governed Financial Advisor** | Node factories (embedded in CAGE monorepo) | [`src/governed_financial_advisor/`](src/governed_financial_advisor/) · [`docs/examples/governed-financial-advisor/ARCHITECTURE.md`](docs/examples/governed-financial-advisor/ARCHITECTURE.md) |
+| **Standalone LangGraph App** | `cage-client` SDK (recommended) | [`packages/cage-client/README.md`](packages/cage-client/README.md) |
+| **Chaos Agent Playground** | Zero-infrastructure demo (no LangGraph) | [`examples/chaos_agent_playground.py`](examples/chaos_agent_playground.py) |
+
+### Learn More
+
+- **Client SDK Documentation:** [`packages/cage-client/README.md`](packages/cage-client/README.md)
+- **Quick Start Guide:** [`docs/guides/LANGGRAPH_QUICKSTART.md`](docs/guides/LANGGRAPH_QUICKSTART.md)
+- **Tutorial Notebook:** [`docs/guides/langgraph_governance_tutorial.ipynb`](docs/guides/langgraph_governance_tutorial.ipynb)
+- **Release Notes:** [client-v0.1.0](https://github.com/google/cybernetic-agent-governance-engine/releases/tag/client-v0.1.0)
+- **LangGraph Harness (Advanced):** [`docs/architecture/EXTENSIBILITY_ARCHITECTURE.md`](docs/architecture/EXTENSIBILITY_ARCHITECTURE.md#41-langgraph-harness--governance-node-composition)
+- **HITL Interrupt Pattern:** [`docs/security/HITL_TOCTOU_REMEDIATION.md`](docs/security/HITL_TOCTOU_REMEDIATION.md)
 
 ---
 
@@ -463,6 +663,7 @@ CAGE enforces strict deployment rules to ensure compliance and consistency:
 |--------|--------------|---------|
 | GKE Production | ☁️ Cloud Build | `./deploy_all.sh --target gcp-gke --env prod` |
 | GKE Development | ☁️ Cloud Build | `./deploy_all.sh --target gcp-gke --env dev --auto-approve` |
+| Cloud Run Dev/Prod | ☁️ Cloud Build + Terraform | See [Cloud Run Deployment](#cloud-run-deployment) |
 | Local k3d/kind | 🐳 Local Docker | `./deploy_all.sh --target agnostic --env dev` |
 | Docker Compose | 🐳 Local Docker | `docker compose up` |
 
@@ -470,6 +671,95 @@ CAGE enforces strict deployment rules to ensure compliance and consistency:
 - [Deployment Rules](docs/operations/DEPLOYMENT_RULES.md) — Complete deployment policy
 - [Agent Ops Architecture](docs/architecture/AGENT_OPS_ARCHITECTURE.md) — Defense-in-depth governance pattern
 - [Deployment Guide](infra/DEPLOYMENT_GUIDE.md) — Step-by-step procedures
+
+---
+
+## Cloud Run Deployment
+
+CAGE supports first-class deployment to **Google Cloud Run** with serverless infrastructure, Cloud Armor WAF, and platform-native authentication.
+
+### Prerequisites
+
+- GCP project with Cloud Run API enabled
+- `gcloud` CLI authenticated (`gcloud auth application-default login`)
+- Terraform >= 1.9
+- Custom domain (optional, for production SSL certificates)
+
+### Quick Start (Dev Environment)
+
+```bash
+# 1. Build OPA sidecar image
+gcloud builds submit --config deployment/docker/cloudbuild.opa.yaml
+
+# 2. Generate dev tfvars
+cd infra/targets/gcp-cloudrun
+cat > dev.tfvars <<EOF
+project_id                = "your-dev-project"
+region                    = "us-central1"
+environment               = "dev"
+cage_deployment_region    = "US_FED"
+enable_load_balancer      = false  # Public *.run.app URL
+gateway_domain            = ""
+EOF
+
+# 3. Deploy
+terraform init
+terraform apply -var-file=dev.tfvars
+
+# 4. Verify
+GATEWAY_URL=$(terraform output -raw gateway_url)
+curl $GATEWAY_URL/health
+```
+
+### Production Deployment (with Load Balancer + Cloud Armor)
+
+```bash
+# 1. Update tfvars for production
+cat > prod.tfvars <<EOF
+project_id                = "your-prod-project"
+region                    = "us-central1"
+environment               = "prod"
+cage_deployment_region    = "US_FED"
+enable_nist_compliance    = true
+enable_high_availability  = true
+enable_load_balancer      = true
+gateway_domain            = "gateway.your-domain.com"
+gateway_min_instances     = 2
+EOF
+
+# 2. Deploy (creates LB + Cloud Armor first, then tightens ingress)
+terraform apply -var-file=prod.tfvars
+
+# 3. Get load balancer IP and update DNS
+LB_IP=$(terraform output -raw load_balancer_ip)
+# Create DNS A record: gateway.your-domain.com  A  <LB_IP>
+
+# 4. Wait for SSL certificate provisioning (15-60 minutes)
+gcloud compute ssl-certificates list --project=your-prod-project
+
+# 5. Verify HTTPS works
+curl https://gateway.your-domain.com/health
+```
+
+### Security Features
+
+- **OPA Policy Sidecar**: Baked policy bundle with fail-closed startup ordering
+- **Cloud Armor WAF**: 10 OWASP CRS rules (XSS, SQLi, LFI, RCE, scanner detection)
+- **Rate Limiting**: 100 requests/min per IP (prod only, 10-min ban on exceed)
+- **OIDC Authentication**: Inter-service calls use audience-scoped metadata server tokens
+- **WORM Evidence Retention**: 7-year locked retention policy on compliance artifacts
+- **Ingress Controls**:
+  - Gateway: `INTERNAL_AND_CLOUD_LOAD_BALANCING` (LB-only access when enabled)
+  - Internal services: `INGRESS_TRAFFIC_INTERNAL_ONLY` (VPC-only access)
+
+### Architecture
+
+- **Serverless NEG**: Backend service targets Cloud Run via Network Endpoint Group
+- **Multi-container services**: Gateway runs OPA sidecar on `localhost:8181`
+- **Managed SSL**: Google-managed certificates with TLS 1.2 minimum
+- **Platform Identity**: Service accounts mint OIDC ID tokens from metadata server
+
+See [`docs/architecture/CLOUD_RUN_IMPLEMENTATION_PLAN.md`](docs/architecture/CLOUD_RUN_IMPLEMENTATION_PLAN.md) for full specification.
 
 ---
 
@@ -572,7 +862,7 @@ cp .env.example .env
 ./deploy_all.sh --target agnostic --env dev
 
 # Or start services locally with Docker Compose
-# This starts: OPA (127.0.0.1:8181), SLM (localhost:5000),
+# This starts: OPA (127.0.0.1:8181),
 # Gateway (localhost:8080), and App (localhost:3000)
 docker compose up
 
@@ -704,6 +994,7 @@ cybernetic-agent-governance-engine/
 | [`docs/compliance/eu_ecb/POAM_EU_ECB.md`](docs/compliance/eu_ecb/POAM_EU_ECB.md)                                           | POA&M — EU_ECB EU AI Act / DORA / GDPR (5 items)                  |
 | [`docs/compliance/apac_mas/POAM_APAC_MAS.md`](docs/compliance/apac_mas/POAM_APAC_MAS.md)                                       | POA&M — APAC_MAS MAS FEAT / Notice 655 / TRM (4 items)            |
 | [`docs/architecture/GATEWAY_ARCHITECTURE.md`](docs/architecture/GATEWAY_ARCHITECTURE.md)                         | Gateway subsystem detail                                           |
+| [`docs/architecture/AGENT_IDENTITY_BINDING_SPEC.md`](docs/architecture/AGENT_IDENTITY_BINDING_SPEC.md) | **Canonical agent identity spec** — SPIFFE SVID extraction from mTLS, DPoP double-binding (RFC 9449), namespace prefix policies, A2A delegation |
 | [`docs/architecture/SYMBOLIC_GOVERNOR_RUNTIME.md`](docs/architecture/SYMBOLIC_GOVERNOR_RUNTIME.md)        | Dispatch loop, 2-phase commit, and interruption taxonomy |
 | [`docs/architecture/CONSEQUENCE_GATEWAY.md`](docs/architecture/CONSEQUENCE_GATEWAY.md)        | 6-step token evaluation, JWS verification, and authority store |
 | [`docs/architecture/FTRA_REACHABILITY_ANALYZER.md`](docs/architecture/FTRA_REACHABILITY_ANALYZER.md)  | Forward-Looking Trajectory Reachability Analyzer — Irreversibility classification and graph bounding |

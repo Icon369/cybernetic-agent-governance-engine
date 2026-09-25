@@ -1,6 +1,6 @@
 # Adapted from the open-source implementation by LalaSkye (Apache 2.0)
 # Original repository: https://github.com/LalaSkye/no-direct-bind
-# Modifications: Adapted for the CAGE 8-tier governance architecture,
+# Modifications: Adapted for the CAGE 9-tier governance architecture,
 # extended with Gap 1/2/3/4 sub-proofs and a concurrency-interleaving
 # sub-proof, and integrated with CAGE state machine phases
 # (PENDING → CHECKING → SEAL_ISSUED → EXECUTED/DENIED).
@@ -12,15 +12,17 @@
 # ---------------------------------------------------------------------------
 # Model Scope & Distributed Extensions (review recommendation by Krti Tallam)
 # ---------------------------------------------------------------------------
-# This model covers SINGLE-REQUEST concurrency within the governance pipeline.
-# It proves the No-Direct-Bind invariant holds for all interleavings of the
-# concurrent CBF/OPA tier evaluations within one request.
+# This model covers SINGLE-REQUEST evaluation within the governance pipeline.
+# It proves the No-Direct-Bind invariant holds for sequential tier evaluations.
 #
-# State counts (C1-sub audit remediation — added NARROW/PAUSE states):
-#   - Gated sequential model: ~57 reachable states (was 21 before NARROW/PAUSE)
-#   - Concurrent CBF/OPA model: ~66 reachable states (was 24 before NARROW/PAUSE)
-#   - Ungated (direct-bind) model: 19 reachable states (unchanged)
-# The increase is due to:
+# State counts — these are PINNED by tests/test_no_direct_bind_proof.py
+# (EXPECTED_GATED_STATES / EXPECTED_UNGATED_STATES / EXPECTED_CONCURRENT_STATES)
+# and must be regenerated (``uv run python proof/model.py``) whenever the
+# transition relation changes:
+#   - Gated sequential model:     44 reachable states
+#   - Concurrent CBF/OPA model:   49 reachable states (strict superset of gated)
+#   - Ungated (direct-bind) model: 21 reachable states
+# NARROW/PAUSE terminal states are included in the counts above, enabled by:
 #   - soft_threshold_exceeded flag (enables NARROW terminal state)
 #   - transient_block flag (enables PAUSE terminal state)
 #   - Non-deterministic branching in tier PASS transitions
@@ -49,7 +51,7 @@ Theorem (No-Direct-Bind):
         NoDirectBind == (phase = "EXECUTED") => (resolvedAllow = TRUE)
 
 This file:
-  1. Defines the CAGE 8-tier governance state machine.
+  1. Defines the CAGE 9-tier governance state machine (FTRA + 8 in-pipeline tiers).
   2. Enumerates every reachable state via BFS.
   3. Asserts the invariant holds in ALL reachable states.
   4. Defines an ungated (direct-bind) variant and proves it VIOLATES the
@@ -137,10 +139,18 @@ TIERS = (
     "fria",  # Tier 7:  FRIA normative boundary enforcement
 )
 
-# The subset of tiers that the runtime evaluates concurrently
-# (``asyncio.gather()`` in symbolic_governor.py).  Used by
-# ``concurrent_tier_transitions()`` to explore both interleavings.
-CONCURRENT_TIERS = frozenset({"cbf", "opa"})
+TIER_LABELS: dict[str, str] = {
+    "ftra": "Tier 0.5",
+    "stpa": "Tier 1",
+    "confidence": "Tier 2",
+    "cbf": "Tier 3a",
+    "opa": "Tier 3b",
+    "fiscal": "Tier 4",
+    "consensus": "Tier 5",
+    "causal": "Tier 6",
+    "fria": "Tier 7",
+}
+
 
 # Execution phases — mirrors the TLA+ state machine.
 # Updated to include NARROW and PAUSE states per C1-sub audit remediation:
@@ -644,101 +654,6 @@ def ungated_narrow_transitions(state: State) -> Iterator[State]:
 # ---------------------------------------------------------------------------
 
 
-def concurrent_tier_transitions(state: State) -> Iterator[State]:
-    """Gated transitions in which the concurrent tiers may resolve in any order.
-
-    ``gated_transitions()`` advances tiers strictly in ``TIERS`` order, which
-    is an *under-approximation* of the runtime: ``SymbolicGovernor._run_checks()``
-    dispatches the CBF and OPA checks together via ``asyncio.gather()``, so
-    either may resolve first.
-
-    This variant relaxes the ordering constraint for every tier in
-    ``CONCURRENT_TIERS``: whenever the next pending tier belongs to that set,
-    *any* pending concurrent tier may advance.  Every interleaving of the
-    concurrent tiers — including the partial-failure states in which one has
-    resolved and the other has not — therefore appears in the reachable set.
-
-    Because this strictly adds transitions (and thus states) relative to
-    ``gated_transitions()``, proving the invariant here is a strictly stronger
-    result: the seal gate holds under every interleaving, not merely under the
-    canonical order.
-
-    Updated for NARROW/PAUSE states: the concurrent transitions preserve the
-    soft_threshold_exceeded and transient_block flags, allowing NARROW and
-    PAUSE terminal states to be reached via any CBF/OPA interleaving.
-    """
-    if state.phase != "CHECKING":
-        yield from gated_transitions(state)
-        return
-
-    results = dict(state.tier_results)
-    pending_tiers = [t for t in TIERS if results[t] == "PENDING"]
-
-    if not pending_tiers:
-        # Terminal resolution is order-independent — delegate.
-        yield from gated_transitions(state)
-        return
-
-    next_tier = pending_tiers[0]
-    if next_tier not in CONCURRENT_TIERS:
-        yield from gated_transitions(state)
-        return
-
-    # The pipeline has reached the concurrent gate: any pending concurrent
-    # tier may resolve next, in either order.
-    advanceable = [t for t in pending_tiers if t in CONCURRENT_TIERS]
-    for tier in advanceable:
-        for outcome in ("PASS", "FAIL"):
-            new_results = dict(state.tier_results)
-            new_results[tier] = outcome
-            new_tier_results = tuple((t, new_results[t]) for t in TIERS)
-
-            if outcome == "FAIL":
-                # Fail-closed: either concurrent check failing denies the action.
-                yield State(
-                    phase="DENIED",
-                    tier_results=new_tier_results,
-                    seal_present=False,
-                    resolved_allow=False,
-                    soft_threshold_exceeded=False,
-                    transient_block=False,
-                )
-            else:
-                # PASS: continue checking, preserving threshold/transient flags
-                yield State(
-                    phase="CHECKING",
-                    tier_results=new_tier_results,
-                    seal_present=False,
-                    resolved_allow=False,
-                    soft_threshold_exceeded=state.soft_threshold_exceeded,
-                    transient_block=state.transient_block,
-                )
-                # Also model with soft_threshold_exceeded condition
-                if not state.soft_threshold_exceeded and not state.transient_block:
-                    yield State(
-                        phase="CHECKING",
-                        tier_results=new_tier_results,
-                        seal_present=False,
-                        resolved_allow=False,
-                        soft_threshold_exceeded=True,
-                        transient_block=False,
-                    )
-                    # Model with transient_block condition
-                    yield State(
-                        phase="CHECKING",
-                        tier_results=new_tier_results,
-                        seal_present=False,
-                        resolved_allow=False,
-                        soft_threshold_exceeded=False,
-                        transient_block=True,
-                    )
-
-
-# ---------------------------------------------------------------------------
-# BFS reachable-state enumerator
-# ---------------------------------------------------------------------------
-
-
 def enumerate_reachable(
     transition_fn,
     start: State | None = None,
@@ -837,30 +752,6 @@ def main() -> None:
             "check transition function."
         )
 
-    print()
-
-    # ── Concurrency sub-proof: CBF/OPA interleaving ───────────────────────────
-    # gated_transitions() resolves tiers in a fixed order, which under-
-    # approximates the runtime (asyncio.gather dispatches CBF and OPA
-    # together).  concurrent_tier_transitions() explores both interleavings,
-    # producing a strict superset of the gated reachable states.
-    concurrent_states = enumerate_reachable(concurrent_tier_transitions)
-    concurrent_holds, concurrent_cex = check_no_direct_bind(concurrent_states)
-    concurrent_executed = [s for s in concurrent_states if s.phase == "EXECUTED"]
-
-    print("Concurrency sub-proof (CBF ∥ OPA interleaving):")
-    print(
-        f"  Reachable states: {len(concurrent_states)} "
-        f"(gated: {len(gated_states)}) — superset={gated_states <= concurrent_states}"
-    )
-    print(f"  No-Direct-Bind holds under every interleaving: {concurrent_holds}")
-    print(
-        f"  EXECUTED states: {len(concurrent_executed)} "
-        f"(all with resolvedAllow=TRUE: "
-        f"{all(s.resolved_allow for s in concurrent_executed)})"
-    )
-    if not concurrent_holds:
-        print(f"  ❌ COUNTEREXAMPLE FOUND: {concurrent_cex}")
     print()
 
     # ── Gap-specific sub-proofs ───────────────────────────────────────────────
@@ -1072,12 +963,6 @@ def main() -> None:
     assert not no_seal_holds, (
         "PROOF FAILED: no-seal govern() should violate No-Direct-Bind!"
     )
-    assert concurrent_holds, (
-        "PROOF FAILED: No-Direct-Bind does not hold under CBF/OPA interleaving!"
-    )
-    assert gated_states <= concurrent_states, (
-        "PROOF FAILED: the concurrent model must over-approximate the sequential one!"
-    )
     # NARROW/PAUSE assertions
     assert narrow_valid, (
         "PROOF FAILED: NARROW states must have resolvedAllow=TRUE and seal_present=TRUE!"
@@ -1096,16 +981,13 @@ def main() -> None:
     print(f"     entire reachable state space ({len(gated_states)} states).")
     print("  2. The ungated (direct-bind) variant provably violates the invariant.")
     print("  3. The pre-fix govern() path (no seal) provably violates the invariant.")
-    print("  4. The invariant is order-independent across the concurrently-")
-    print(f"     evaluated CBF and OPA tiers ({len(concurrent_states)} states,")
-    print("     a strict superset of the sequential model).")
-    print(f"  5. NARROW states ({len(narrow_states)}) are ALLOW variants with")
+    print(f"  4. NARROW states ({len(narrow_states)}) are ALLOW variants with")
     print("     resolvedAllow=TRUE and seal_present=TRUE (seal on clamped params).")
-    print(f"  6. PAUSE states ({len(pause_states)}) are retryable with")
+    print(f"  5. PAUSE states ({len(pause_states)}) are retryable with")
     print(
         "     resolvedAllow=FALSE and seal_present=FALSE (no execution without re-check)."
     )
-    print("  7. The ungated NARROW variant produces a counterexample, confirming")
+    print("  6. The ungated NARROW variant produces a counterexample, confirming")
     print("     the seal gate is load-bearing for NARROW decisions as well.")
     print()
     print("PLAUSIBLE (not proved here):")

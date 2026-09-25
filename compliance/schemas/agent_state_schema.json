@@ -241,6 +241,27 @@
         "string",
         "null"
       ]
+    },
+    "agent_id": {
+      "type": "string"
+    },
+    "proposed_action": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "governance_envelope": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "governance_status": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "$defs": {

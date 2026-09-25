@@ -49,6 +49,8 @@ from src.gateway.governance.seams.normative import (
     ValidationResult,
 )
 from src.integrations.provider_07 import (
+    InferThetaInferenceRequest,
+    InferThetaInferenceResponse,
     NormativeProviderError,
     Provider07JwksClient,
     Provider07NormativeProvider,
@@ -743,3 +745,375 @@ def test_verify_inference_signature_invalid(
     )
 
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Partner Contract Alignment Vectors (InferTheta Step 1 Review Package)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def partner_contract_vectors() -> list[dict[str, Any]]:
+    """Test vectors provided by InferTheta partner for Step 1 field-name lock."""
+    return [
+        {
+            "id": "allow",
+            "narrative": "Moderate client, balanced mix, small bond buy, low VIX.",
+            "request": {
+                "scenario_id": "11111111-1111-4111-8111-111111111111",
+                "action": "rebalance_portfolio",
+                "target": "urn:account:client-allow:portfolio-main",
+                "actor_id": "urn:agent:financial-advisor-bot-v2",
+                "portfolio_vector": {
+                    "US_EQUITY": 0.4,
+                    "INTL_EQUITY": 0.1,
+                    "FIXED_INCOME": 0.4,
+                    "CASH": 0.1,
+                },
+                "proposed_trade": {
+                    "asset": "VANGUARD_TOTAL_BOND_INDEX",
+                    "side": "BUY",
+                    "amount": 25000,
+                    "currency": "USD",
+                },
+                "client_profile": {
+                    "risk_tolerance": "MODERATE",
+                    "investment_horizon_years": 12,
+                    "liquidity_need": "LOW",
+                },
+                "market_volatility_index": 0.12,
+                "context": {
+                    "session_id": "advise-allow",
+                    "timestamp_utc": "2026-09-17T09:00:00Z",
+                },
+            },
+            "response": {
+                "decision": "ALLOW",
+                "confidence_score": 0.905865,
+                "posterior_risk_score": 0.094135,
+                "marginal_probabilities": {
+                    "drawdown_gt_15pct": 0.098859,
+                    "volatility_spike": 0.113137,
+                    "liquidity_stress": 0.053821,
+                },
+                "utility_rankings": [
+                    {"action": "rebalance_to_proposed", "expected_utility": 1.0},
+                    {"action": "defer_to_human", "expected_utility": 0.652098},
+                    {"action": "reject_trade", "expected_utility": 0.26286},
+                ],
+                "authority_record_id": "infertheta-step1-allow-unsigned",
+                "kid": "infertheta-staging-ed25519-step1",
+                "signature": "unsigned-placeholder",
+                "findings": [
+                    {
+                        "rule_id": "FINRA-2111-CUSTOMER-SPECIFIC",
+                        "status": "COMPLIANT",
+                        "evidence": "Best EU is rebalance_to_proposed and risk 0.094 < 0.20.",
+                    },
+                    {
+                        "rule_id": "SEC-REGBI-BEST-INTEREST",
+                        "status": "COMPLIANT",
+                        "evidence": "posterior_risk_score 0.094 = 0.5*0.099 + 0.3*0.113 + 0.2*0.054. Best EU=rebalance_to_proposed. Staging demo — not regulated advice.",
+                    },
+                ],
+            },
+        },
+        {
+            "id": "refuse",
+            "narrative": "Conservative client, already >70% equity, large equity buy, high VIX.",
+            "request": {
+                "scenario_id": "22222222-2222-4222-8222-222222222222",
+                "action": "execute_trade",
+                "target": "urn:account:client-refuse:portfolio-main",
+                "actor_id": "urn:agent:financial-advisor-bot-v2",
+                "portfolio_vector": {
+                    "US_EQUITY": 0.7,
+                    "INTL_EQUITY": 0.15,
+                    "FIXED_INCOME": 0.1,
+                    "CASH": 0.05,
+                },
+                "proposed_trade": {
+                    "asset": "VANGUARD_TOTAL_STOCK_MARKET",
+                    "side": "BUY",
+                    "amount": 150000,
+                    "currency": "USD",
+                },
+                "client_profile": {
+                    "risk_tolerance": "CONSERVATIVE",
+                    "investment_horizon_years": 3,
+                    "liquidity_need": "HIGH",
+                },
+                "market_volatility_index": 0.42,
+                "context": {
+                    "session_id": "advise-refuse",
+                    "timestamp_utc": "2026-09-17T09:00:00Z",
+                },
+            },
+            "response": {
+                "decision": "REFUSE",
+                "confidence_score": 0.550543,
+                "posterior_risk_score": 0.449457,
+                "marginal_probabilities": {
+                    "drawdown_gt_15pct": 0.530463,
+                    "volatility_spike": 0.388515,
+                    "liquidity_stress": 0.338353,
+                },
+                "utility_rankings": [
+                    {"action": "reject_trade", "expected_utility": 1.0},
+                    {"action": "defer_to_human", "expected_utility": 0.623054},
+                    {"action": "rebalance_to_proposed", "expected_utility": 0.191225},
+                ],
+                "authority_record_id": None,
+                "kid": "infertheta-staging-ed25519-step1",
+                "signature": "unsigned-placeholder",
+                "findings": [
+                    {
+                        "rule_id": "FINRA-2111-CUSTOMER-SPECIFIC",
+                        "status": "BREACH",
+                        "evidence": "Best EU action is reject_trade (risk=0.449).",
+                    },
+                    {
+                        "rule_id": "SEC-REGBI-BEST-INTEREST",
+                        "status": "BREACH",
+                        "evidence": "posterior_risk_score 0.449 = 0.5*0.530 + 0.3*0.389 + 0.2*0.338. Best EU=reject_trade. Staging demo — not regulated advice.",
+                    },
+                ],
+            },
+        },
+        {
+            "id": "escalate",
+            "narrative": "Moderate client, modest equity buy, mid VIX.",
+            "request": {
+                "scenario_id": "33333333-3333-4333-8333-333333333333",
+                "action": "execute_trade",
+                "target": "urn:account:client-escalate:portfolio-main",
+                "actor_id": "urn:agent:financial-advisor-bot-v2",
+                "portfolio_vector": {
+                    "US_EQUITY": 0.5,
+                    "INTL_EQUITY": 0.15,
+                    "FIXED_INCOME": 0.25,
+                    "CASH": 0.1,
+                },
+                "proposed_trade": {
+                    "asset": "SPDR_S_AND_P_500",
+                    "side": "BUY",
+                    "amount": 40000,
+                    "currency": "USD",
+                },
+                "client_profile": {
+                    "risk_tolerance": "MODERATE",
+                    "investment_horizon_years": 8,
+                    "liquidity_need": "MEDIUM",
+                },
+                "market_volatility_index": 0.28,
+                "context": {
+                    "session_id": "advise-escalate",
+                    "timestamp_utc": "2026-09-17T09:00:00Z",
+                },
+            },
+            "response": {
+                "decision": "ESCALATE",
+                "confidence_score": 0.742012,
+                "posterior_risk_score": 0.257988,
+                "marginal_probabilities": {
+                    "drawdown_gt_15pct": 0.284518,
+                    "volatility_spike": 0.251557,
+                    "liquidity_stress": 0.201311,
+                },
+                "utility_rankings": [
+                    {"action": "defer_to_human", "expected_utility": 1.0},
+                    {"action": "rebalance_to_proposed", "expected_utility": 0.590234},
+                    {"action": "reject_trade", "expected_utility": 0.580895},
+                ],
+                "authority_record_id": None,
+                "kid": "infertheta-staging-ed25519-step1",
+                "signature": "unsigned-placeholder",
+                "findings": [
+                    {
+                        "rule_id": "FINRA-2111-CUSTOMER-SPECIFIC",
+                        "status": "REVIEW",
+                        "evidence": "Best EU action is defer_to_human (risk=0.258).",
+                    },
+                    {
+                        "rule_id": "SEC-REGBI-BEST-INTEREST",
+                        "status": "REVIEW",
+                        "evidence": "posterior_risk_score 0.258 = 0.5*0.285 + 0.3*0.252 + 0.2*0.201. Best EU=defer_to_human. Staging demo — not regulated advice.",
+                    },
+                ],
+            },
+        },
+    ]
+
+
+class TestInferThetaPartnerContractVectors:
+    """Test suite validating partner InferTheta contract vectors against adapter."""
+
+    def test_partner_vectors_schema_validation(
+        self,
+        partner_contract_vectors: list[dict[str, Any]],
+    ) -> None:
+        """All partner test vectors parse strictly into CAGE Pydantic models."""
+        for vector in partner_contract_vectors:
+            req = InferThetaInferenceRequest(**vector["request"])
+            assert req.action in ("rebalance_portfolio", "execute_trade")
+            assert req.proposed_trade.currency == "USD"
+
+            resp = InferThetaInferenceResponse(**vector["response"])
+            assert resp.decision in ("ALLOW", "REFUSE", "ESCALATE")
+            assert 0.0 <= resp.confidence_score <= 1.0
+            assert 0.0 <= resp.posterior_risk_score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_partner_vector_allow_flow(
+        self,
+        adapter: Provider07NormativeProvider,
+        partner_contract_vectors: list[dict[str, Any]],
+        ed25519_keypair: tuple[Ed25519PrivateKey, Ed25519PublicKey],
+    ) -> None:
+        """Partner ALLOW vector passes verification and admits action."""
+        private_key, _ = ed25519_keypair
+        allow_vector = next(v for v in partner_contract_vectors if v["id"] == "allow")
+
+        signed_resp = sign_response(allow_vector["response"], private_key)
+        mock_response = _mock_http_response(signed_resp)
+
+        with patch("httpx.AsyncClient") as MockClient:
+            client_instance = AsyncMock()
+            client_instance.post.return_value = mock_response
+            MockClient.return_value.__aenter__.return_value = client_instance
+
+            result = await adapter.validate_fria(allow_vector["request"])
+
+        assert isinstance(result, ValidationResult)
+        assert result.admitted is True
+        assert len(result.findings) == 1
+        assert result.findings[0]["code"] == "INFERTHETA_ALLOW"
+        assert (
+            result.findings[0]["authority_record_id"]
+            == "infertheta-step1-allow-unsigned"
+        )
+        assert result.findings[0]["posterior_risk_score"] == pytest.approx(0.094135)
+
+    @pytest.mark.asyncio
+    async def test_partner_vector_refuse_flow(
+        self,
+        adapter: Provider07NormativeProvider,
+        partner_contract_vectors: list[dict[str, Any]],
+        ed25519_keypair: tuple[Ed25519PrivateKey, Ed25519PublicKey],
+    ) -> None:
+        """Partner REFUSE vector fails closed as unsuitable."""
+        private_key, _ = ed25519_keypair
+        refuse_vector = next(v for v in partner_contract_vectors if v["id"] == "refuse")
+
+        signed_resp = sign_response(refuse_vector["response"], private_key)
+        mock_response = _mock_http_response(signed_resp)
+
+        with patch("httpx.AsyncClient") as MockClient:
+            client_instance = AsyncMock()
+            client_instance.post.return_value = mock_response
+            MockClient.return_value.__aenter__.return_value = client_instance
+
+            result = await adapter.validate_fria(refuse_vector["request"])
+
+        assert isinstance(result, ValidationResult)
+        assert result.admitted is False
+        assert len(result.findings) == 1
+        assert result.findings[0]["code"] == "INFERTHETA_UNSUITABLE"
+        assert result.findings[0]["posterior_risk_score"] == pytest.approx(0.449457)
+
+    @pytest.mark.asyncio
+    async def test_partner_vector_escalate_flow(
+        self,
+        adapter: Provider07NormativeProvider,
+        partner_contract_vectors: list[dict[str, Any]],
+        ed25519_keypair: tuple[Ed25519PrivateKey, Ed25519PublicKey],
+    ) -> None:
+        """Partner ESCALATE vector blocks autonomous action and sets needs_human_review."""
+        private_key, _ = ed25519_keypair
+        escalate_vector = next(
+            v for v in partner_contract_vectors if v["id"] == "escalate"
+        )
+
+        signed_resp = sign_response(escalate_vector["response"], private_key)
+        mock_response = _mock_http_response(signed_resp)
+
+        with patch("httpx.AsyncClient") as MockClient:
+            client_instance = AsyncMock()
+            client_instance.post.return_value = mock_response
+            MockClient.return_value.__aenter__.return_value = client_instance
+
+            result = await adapter.validate_fria(escalate_vector["request"])
+
+        assert isinstance(result, ValidationResult)
+        assert result.admitted is False
+        assert len(result.findings) == 1
+        assert result.findings[0]["code"] == "INFERTHETA_ESCALATE"
+        assert result.findings[0]["needs_human_review"] is True
+        assert result.findings[0]["posterior_risk_score"] == pytest.approx(0.257988)
+
+    @pytest.mark.asyncio
+    async def test_partner_vectors_unsigned_fail_closed(
+        self,
+        adapter: Provider07NormativeProvider,
+        partner_contract_vectors: list[dict[str, Any]],
+    ) -> None:
+        """Unsigned Step 1 partner payloads fail closed under default adapter execution."""
+        allow_vector = next(v for v in partner_contract_vectors if v["id"] == "allow")
+        raw_unsigned_response = allow_vector["response"]
+        mock_response = _mock_http_response(raw_unsigned_response)
+
+        with patch("httpx.AsyncClient") as MockClient:
+            client_instance = AsyncMock()
+            client_instance.post.return_value = mock_response
+            MockClient.return_value.__aenter__.return_value = client_instance
+
+            result = await adapter.validate_fria(allow_vector["request"])
+
+        # Fails closed because signature/kid cannot be verified
+        assert isinstance(result, ValidationResult)
+        assert result.admitted is False
+        assert result.findings[0]["code"] in (
+            "INFERTHETA_UNKNOWN_KEY",
+            "INFERTHETA_SIGNATURE_INVALID",
+        )
+
+    @pytest.mark.asyncio
+    async def test_partner_vector_allow_step1_unsigned_mode(
+        self,
+        partner_contract_vectors: list[dict[str, Any]],
+    ) -> None:
+        """allow_step1_unsigned mode admits unsigned ALLOW payload with step1_demo_mode finding."""
+        adapter = Provider07NormativeProvider(
+            endpoint="http://localhost:8087",
+            allow_step1_unsigned=True,
+        )
+        allow_vector = next(v for v in partner_contract_vectors if v["id"] == "allow")
+        raw_unsigned_response = allow_vector["response"]
+        mock_response = _mock_http_response(raw_unsigned_response)
+
+        with patch("httpx.AsyncClient") as MockClient:
+            client_instance = AsyncMock()
+            client_instance.post.return_value = mock_response
+            MockClient.return_value.__aenter__.return_value = client_instance
+
+            result = await adapter.validate_fria(allow_vector["request"])
+
+        assert isinstance(result, ValidationResult)
+        assert result.admitted is True
+        assert result.findings[0]["code"] == "INFERTHETA_ALLOW"
+        assert result.findings[0].get("step1_demo_mode") is True
+        assert (
+            result.findings[0]["authority_record_id"]
+            == "infertheta-step1-allow-unsigned"
+        )
+        assert result.findings[0]["posterior_risk_score"] == pytest.approx(0.094135)
+
+    def test_step1_unsigned_blocked_in_production(self) -> None:
+        """allow_step1_unsigned strictly fails fast when CAGE_ENV is production."""
+        with patch.dict(os.environ, {"CAGE_ENV": "production"}):
+            with pytest.raises(RuntimeError, match="cannot be enabled in production"):
+                Provider07NormativeProvider(
+                    endpoint="http://localhost:8087",
+                    allow_step1_unsigned=True,
+                )
+

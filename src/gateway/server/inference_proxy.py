@@ -20,7 +20,7 @@ vLLM reasoning or governance node.  Contains no MCP tool definitions or
 governance middleware logic.
 
 Governance pipeline applied here:
-  1. Tier-1 Aho-Corasick keyword scan on ALL messages (not just user role).
+  1. Ingress Stage 1 Aho-Corasick keyword scan on ALL messages (not just user role).
   2. Token Quota Enforcement (ISO 42001 Annex A.4) — CTRL_TQP_007.
   3. NeMo Guardrails input verification on ALL messages.
   4. ISO 42001 evidence stamps.
@@ -47,7 +47,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from opentelemetry import trace
 
 from src.gateway.governance.iso_control import stamp_iso_control
-from src.gateway.governance.nemo.manager import verify_and_mask_output, verify_input
 from src.gateway.governance.text_filter import ac_keyword_scan
 from src.gateway.governance.token_quota_proxy import _get_token_quota_proxy
 from src.gateway.governance.uca_logger import _get_uca_logger
@@ -218,7 +217,8 @@ async def chat_completions(
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
     """OpenAI-compatible governed inference endpoint."""
-    from src.gateway.governance.nemo.manager import initialize_rails as _init_rails
+    from src.integrations.nemo.manager import initialize_rails as _init_rails
+    from src.integrations.nemo.manager import verify_and_mask_output, verify_input
 
     # Rails are initialised externally at startup and stored on app.state.
     # Fall back to on-demand init if not set (e.g. during testing).
@@ -270,32 +270,53 @@ async def chat_completions(
             "",
         )
 
-        # Build a combined text representation of ALL messages for Tier-1 scan.
+        # Build a combined text representation of ALL messages for Ingress Stage 1 scan.
         # This prevents system-only or assistant-only requests from bypassing
         # the keyword filter (GHSA-hfqj-24cj-693g).
         all_messages_text = " ".join(
             m.get("content", "") for m in messages if isinstance(m.get("content"), str)
         )
 
-        # 1. Tier-1 keyword scan — applied to ALL messages, not just user role.
+        # 1. Ingress Stage 1 keyword scan — applied to ALL messages, not just user role.
         if ac_keyword_scan(all_messages_text):
-            stamp_iso_control(span, tier=1, control="A.5.2", outcome="BLOCK")
-            blocked = _create_blocked_response("Tier-1 keyword match")
+            stamp_iso_control(span, ingress_stage=1, control="A.5.2", outcome="BLOCK")
+            blocked = _create_blocked_response("Ingress Stage 1 keyword match")
             return JSONResponse(content=blocked, status_code=403)
-        stamp_iso_control(span, tier=1, control="A.5.2", outcome="PASS")
+        stamp_iso_control(span, ingress_stage=1, control="A.5.2", outcome="PASS")
 
-        # ── Step 2: Token Quota Enforcement (ISO 42001 Annex A.4) ──
+        # ── Step 2: Agent Identity Extraction (SC-8 mTLS Authentication) ──
+        # Extract verified SPIFFE URI from client TLS certificate.
+        # Requests without a verified SPIFFE certificate fail closed (401).
+        try:
+            from src.gateway.governance.spiffe_extractor import (
+                extract_spiffe_uri_from_asgi_scope,
+            )
+
+            agent_id = extract_spiffe_uri_from_asgi_scope(request.scope)
+        except Exception as spiffe_exc:
+            logger.error(
+                "Failed to extract SPIFFE identity from client certificate: %s — failing closed",
+                spiffe_exc,
+            )
+            stamp_iso_control(span, ingress_stage=0, control="SC-8", outcome="BLOCK")
+            return JSONResponse(
+                content={
+                    "error": "authentication_required",
+                    "message": "Client certificate with valid SPIFFE URI required",
+                    "detail": str(spiffe_exc),
+                },
+                status_code=401,
+            )
+
+        # ── Step 3: Token Quota Enforcement (ISO 42001 Annex A.4) ──
         # Runs for ALL requests regardless of message role composition.
-        agent_id = (
-            body.get("agent_id") or request.headers.get("X-Agent-ID", "") or "anonymous"
-        )
         token_delta = int(body.get("max_tokens", 0))
         quota_result = await _get_token_quota_proxy().check_and_increment(
             agent_id=agent_id,
             token_delta=token_delta,
         )
         if not quota_result.allowed:
-            stamp_iso_control(span, tier=2, control="A.4", outcome="BLOCK")
+            stamp_iso_control(span, ingress_stage=2, control="A.4", outcome="BLOCK")
             # Awaited inline — WORM write must complete before 429 is
             # returned to guarantee ISO 42001 Clause 6.1 audit lineage
             # survives spot-instance eviction.
@@ -314,13 +335,13 @@ async def chat_completions(
                 },
                 status_code=429,
             )
-        stamp_iso_control(span, tier=2, control="A.4", outcome="PASS")
+        stamp_iso_control(span, ingress_stage=2, control="A.4", outcome="PASS")
 
-        # 3. NeMo input verification — runs for ALL requests.
+        # 4. NeMo input verification — runs for ALL requests.
         # Uses the full message list; falls back to last_user_msg for NeMo
         # rails that expect a single string (NeMo context is the last user msg
         # or a concatenation of all messages when no user message exists).
-        # Steps 3-6 are wrapped in a try/except so that any downstream
+        # Steps 4-7 are wrapped in a try/except so that any downstream
         # failure triggers a quota rollback (CTRL_TQP_007 §5.3).
         nemo_input_text = last_user_msg if last_user_msg else all_messages_text
         try:
@@ -367,10 +388,12 @@ async def chat_completions(
                 rails, nemo_input_text, pre_check_results=pre_check_results
             )
             if not nemo_result.is_safe:
-                stamp_iso_control(span, tier=3, control="A.6.1.2", outcome="BLOCK")
+                stamp_iso_control(
+                    span, ingress_stage=3, control="A.6.1.2", outcome="BLOCK"
+                )
                 blocked = _create_blocked_response(nemo_result.reason)
                 return JSONResponse(content=blocked, status_code=403)
-            stamp_iso_control(span, tier=3, control="A.6.1.2", outcome="PASS")
+            stamp_iso_control(span, ingress_stage=3, control="A.6.1.2", outcome="PASS")
 
         except Exception:
             await _get_token_quota_proxy().rollback_step(
@@ -378,7 +401,7 @@ async def chat_completions(
             )
             raise
 
-        # 4. Forward to vLLM (R-06 fix — pooled client, streaming support)
+        # 5. Forward to vLLM (R-06 fix — pooled client, streaming support)
         api_base = _resolve_backend_url(model_id)
         api_key = config_manager.get("VLLM_API_KEY") or "EMPTY"
         target_url = f"{api_base.rstrip('/')}/chat/completions"
@@ -398,7 +421,7 @@ async def chat_completions(
         )
 
         if want_stream:
-            stamp_iso_control(span, tier=4, control="A.5.3", outcome="STREAM")
+            stamp_iso_control(span, ingress_stage=4, control="A.5.3", outcome="STREAM")
             logger.info("Streaming response: model=%s", model_id)
             # Collect the full streamed response so output filtering can be
             # applied before returning to the client.  Streaming responses
@@ -516,7 +539,7 @@ async def chat_completions(
             safe_err = _safe_error_response(exc)
             raise HTTPException(status_code=500, detail=safe_err)
 
-        # 5. Output filtering / PII masking
+        # 6. Output filtering / PII masking
         if vllm_response.get("choices"):
             choice = vllm_response["choices"][0]
             message = choice.get("message", {})

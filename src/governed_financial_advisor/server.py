@@ -151,7 +151,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             # Only AsyncRedisSaver has setup(); MemorySaver does not
             try:
                 from langgraph.checkpoint.redis import AsyncRedisSaver
-                
+
                 if isinstance(cp, AsyncRedisSaver):
                     logger.info("Running Redis Checkpointer setup()...")
                     await cp.setup()
@@ -212,45 +212,11 @@ if (
 # Graph is now in app.state.graph
 
 
+from src.governed_financial_advisor.graph.nodes.approval_contract import (
+    ApprovalDecision as ApprovalResumeRequest,
+)
 
-
-class ApprovalResumeRequest(BaseModel):
-    """Request body for POST /v1/approvals/{thread_id}/resume.
-
-    Attributes:
-        ticket_id: Unique defer ticket ID for atomic idempotency enforcement.
-        approved:  Whether the trade is approved or rejected.
-        reviewer:  Identity of the human reviewer (email or employee ID).
-                   Used for ISO 42001 A.7.2 accountability attribution.
-        rationale: Mandatory free-text justification.  The auditor's reason
-                   for this decision is hashed directly into the evidence chain —
-                   an unexplained resume is a compliance gap (ISO 42001 §6.1,
-                   NIST AI RMF GOVERN-5).
-        comment:   Optional supplementary note (legacy field — prefer rationale).
-    """
-
-    ticket_id: str | None = None
-    approved: bool
-    reviewer: str
-    rationale: str  # mandatory — cannot be empty string
-    comment: str = ""  # kept for backwards compatibility
-    max_slippage_pct: float = 2.0  # reviewer's execution price tolerance (%)
-    # Default: 2.0% (institutional large-cap standard).
-
-    @staticmethod
-    def _validate_rationale(value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError(
-                "rationale is required and must be a non-empty string. "
-                "Provide the business justification for this approval decision "
-                "so it can be hashed into the compliance evidence chain."
-            )
-        return value
-
-    @model_validator(mode="after")
-    def _check_rationale_not_empty(self) -> "ApprovalResumeRequest":
-        self._validate_rationale(self.rationale)
-        return self
+# Deprecated class definition removed. Use ApprovalDecision directly.
 
 
 class RefinementTriggerRequest(BaseModel):
@@ -504,183 +470,6 @@ async def query_agent(  # type: ignore[no-untyped-def]
 # ---------------------------------------------------------------------------
 # Approval endpoints (Phase 1b — LangGraph interrupt / Command)
 # ---------------------------------------------------------------------------
-
-
-@app.post("/v1/approvals/{thread_id}/resume")
-async def resume_approval(  # type: ignore[no-untyped-def]
-    thread_id: str,
-    req: ApprovalResumeRequest,
-    request: Request,
-    _auth: str = Depends(require_api_key),
-):
-    """
-    Resume an interrupted graph that is awaiting human trade approval.
-
-    Implements atomic ticket invalidation to prevent double-execution:
-      1. Atomically resolve the ticket via DeferQueue.atomic_resolve()
-      2. If ticket already resolved/expired → HTTP 409 Conflict
-      3. If CAS succeeds → proceed with graph resumption
-
-    The graph must already be in an interrupted state (paused at approval_node)
-    for the given thread_id.  Issues a Command(resume={...}) to unblock it.
-
-    Returns:
-        {"status": "resumed", "thread_id": str, "approved": bool}
-
-    Raises:
-        409 if the ticket_id has already been resolved or expired.
-        404 if thread_id is not found or is not awaiting approval.
-        500 on unexpected errors.
-    """
-    graph = request.app.state.graph
-    defer_queue = getattr(request.app.state, "defer_queue", None)
-    config = {"configurable": {"thread_id": thread_id}}
-
-    # ------------------------------------------------------------------
-    # ATOMIC IDEMPOTENCY GATE: Prevent double-execution via CAS
-    # Only the first resume attempt for a given ticket_id succeeds.
-    # ------------------------------------------------------------------
-    if req.ticket_id and defer_queue is not None:
-        if not await defer_queue.atomic_resolve(req.ticket_id, "PENDING", "RESOLVED"):
-            logger.warning(
-                "[Approvals] Ticket already resolved or expired: ticket_id=%s thread_id=%s",
-                req.ticket_id,
-                thread_id,
-            )
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Ticket '{req.ticket_id}' has already been resolved or expired. "
-                    "This approval decision cannot be applied twice. If you need to "
-                    "re-submit, please generate a new approval request."
-                ),
-            )
-
-        logger.info(
-            "[Approvals] Atomic ticket resolution succeeded: ticket_id=%s thread_id=%s",
-            req.ticket_id,
-            thread_id,
-        )
-
-    # Check that this thread_id exists and is interrupted
-    try:
-        state_snapshot = await graph.aget_state(config)
-    except Exception as exc:
-        logger.error("Failed to fetch state for thread_id=%s: %s", thread_id, exc)
-        raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found.")
-
-    if state_snapshot is None:
-        raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found.")
-
-    # LangGraph marks interrupted graphs with non-empty `next` pointing at the
-    # interrupted node, and the `tasks` list carries interrupt payloads.
-    is_interrupted = bool(
-        state_snapshot.next
-        and any(
-            getattr(task, "interrupts", None) for task in (state_snapshot.tasks or [])
-        )
-    )
-    if not is_interrupted:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Thread '{thread_id}' is not awaiting approval.",
-        )
-
-    # ------------------------------------------------------------------
-    # TTL Guard: check if the approval window has expired.
-    # The approval_node stamps each interrupt payload with an "expires_at"
-    # ISO-8601 timestamp (HITL_APPROVAL_TTL_SECONDS from env, default 300s).
-    # An expired approval returns HTTP 410 Gone — the reviewer must re-submit.
-    # ------------------------------------------------------------------
-    for task in state_snapshot.tasks or []:
-        for interrupt_obj in getattr(task, "interrupts", None) or []:
-            payload = getattr(interrupt_obj, "value", None)
-            if isinstance(payload, dict):
-                expires_at_str = payload.get("expires_at")
-                if expires_at_str:
-                    try:
-                        expires_at = datetime.fromisoformat(expires_at_str)
-                        if datetime.now(timezone.utc) > expires_at:
-                            logger.warning(
-                                "[Approvals] TTL expired for thread_id=%s (expires_at=%s) — "
-                                "returning 410 Gone.",
-                                thread_id,
-                                expires_at_str,
-                            )
-                            raise HTTPException(
-                                status_code=410,
-                                detail=(
-                                    f"Approval window expired at {expires_at_str}. "
-                                    "Market conditions may have changed significantly. "
-                                    "Please re-submit the trade request for a fresh evaluation."
-                                ),
-                            )
-                    except HTTPException:
-                        raise
-                    except Exception:
-                        pass  # Parsing failure — do not block the resume.
-
-    resume_payload = {
-        "approved": req.approved,
-        "reviewer": req.reviewer,
-        "rationale": req.rationale,
-        "comment": req.comment,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "max_slippage_pct": req.max_slippage_pct,  # TOCTOU: reviewer's slippage tolerance
-    }
-
-    logger.info(
-        "[Approvals] Resuming thread_id=%s approved=%s reviewer=%s rationale=%r",
-        thread_id,
-        req.approved,
-        req.reviewer,
-        req.rationale[:120],
-    )
-
-    # ------------------------------------------------------------------
-    # Write the approval decision into the tamper-evident evidence chain
-    # BEFORE resuming the graph.  This ensures the human rationale is
-    # hashed and persisted even if the graph crashes during execution.
-    # The record satisfies ISO 42001 §6.1 (risk treatment decisions),
-    # A.7.2 (accountability), and NIST AI RMF GOVERN-5 (human oversight).
-    # ------------------------------------------------------------------
-    try:
-        from examples.telemetry import PlaygroundTelemetry
-
-        _tel = PlaygroundTelemetry()
-        _tel.record_approval(
-            thread_id=thread_id,
-            approved=req.approved,
-            reviewer=req.reviewer,
-            rationale=req.rationale,
-            comment=req.comment,
-        )
-    except Exception as _tel_exc:
-        # Evidence chain write failure must NEVER block the approval flow.
-        # Log at ERROR (will trigger alerting) but continue.
-        logger.error(
-            "[Approvals] Evidence chain write failed for thread_id=%s — "
-            "approval will proceed but audit record may be missing: %s",
-            thread_id,
-            _tel_exc,
-        )
-
-    try:
-        await graph.ainvoke(
-            Command(resume=resume_payload),
-            config,
-        )
-    except Exception as exc:
-        logger.error("Failed to resume thread_id=%s: %s", thread_id, exc)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    return {
-        "status": "resumed",
-        "thread_id": thread_id,
-        "approved": req.approved,
-        "evidence_recorded": True,
-    }
 
 
 @app.get("/v1/approvals/pending")

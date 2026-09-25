@@ -258,9 +258,9 @@ async def tier1_keyword_check(text: str, span: Any = None) -> str | None:
     Stamps the ISO 42001 evidence attribute on *span* when provided.
     """
     if ac_keyword_scan(text):
-        stamp_iso_control(span, tier=1, control="A.5.2", outcome="BLOCK")
+        stamp_iso_control(span, ingress_stage=1, control="A.5.2", outcome="BLOCK")
         return "keyword_match"
-    stamp_iso_control(span, tier=1, control="A.5.2", outcome="PASS")
+    stamp_iso_control(span, ingress_stage=1, control="A.5.2", outcome="PASS")
     return None
 
 
@@ -287,7 +287,7 @@ async def sanitize_mcp_tool_response(
     """
     result = detect_indirect_injection(tool_name, response_text)
     if result.detected:
-        stamp_iso_control(span, tier=2, control="A.9.2", outcome="BLOCK")
+        stamp_iso_control(span, ingress_stage=2, control="A.9.2", outcome="BLOCK")
         logger.warning(
             '🔴 [AI600-003] MCP tool response rejected: tool=%s pattern=%s "\n'
             "(ISO 42001 A.9.2 — indirect injection blocked)",
@@ -295,7 +295,7 @@ async def sanitize_mcp_tool_response(
             result.pattern_matched,
         )
         return f"indirect_injection:{result.pattern_matched}"
-    stamp_iso_control(span, tier=2, control="A.9.2", outcome="PASS")
+    stamp_iso_control(span, ingress_stage=2, control="A.9.2", outcome="PASS")
     return None
 
 
@@ -832,20 +832,20 @@ async def validate_action_endpoint(
         ``opentelemetry.propagate.inject(headers)``.  This endpoint extracts
         it and attaches the incoming span context so that all
         ``cage.validate_action`` child spans are connected to the GFA's
-        ``cage.tool_execute`` root span, producing a unified Langfuse trace
+        ``cage.tool_execute`` root span, producing a unified Telemetry trace
         tree across the service boundary.
 
     Governance tiers executed (full 8-tier pipeline — FTRA pre-gate + 7 in-pipeline tiers via _run_checks()):
-        - Tier 0: STPA/STAMP Unsafe Control Action validation
-        - Tier 1: Agent confidence threshold pre-check (fast-fail)
-        - Tier 2: Control Barrier Function (CBF) — mathematical safety bounds
-          (runs concurrently with Tier 4 OPA check via asyncio.gather)
-        - Tier 3: Fiscal Limit Pre-Reservation — atomic Redis WATCH/MULTI/EXEC
-        - Tier 4: OPA Rego policy evaluation — declarative rule enforcement
-          (CBF and OPA run concurrently via asyncio.gather for execute_trade)
+        - Tier 0.5: FTRA action classification & reachability analysis
+        - Tier 1: STPA/STAMP Unsafe Control Action validation
+        - Tier 2: Agent confidence threshold pre-check (fast-fail)
+        - Tier 3a: Control Barrier Function (CBF) — mathematical safety bounds
+          (runs concurrently with Tier 3b OPA check via asyncio.gather)
+        - Tier 3b: OPA Rego policy evaluation — declarative rule enforcement
+        - Tier 4: Fiscal Limit Pre-Reservation — atomic Redis WATCH/MULTI/EXEC
         - Tier 5: Multi-agent Consensus gate (ISO 42001)
         - Tier 6: DoWhy Causal Gatekeeper — refutation-based safety lock
-        - Tier 6b: Adaptive FRIA Enforcement (EU AI Act Art. 29a)
+        - Tier 7: Adaptive FRIA Enforcement (EU AI Act Art. 29a)
 
     The routing seal is issued ONLY after all tiers pass — a seal issued
     before full pipeline completion would imply governance approval that
@@ -889,7 +889,7 @@ async def validate_action_endpoint(
     # here and attaching it as the current context means all spans opened by
     # symbolic_governor.validate_action() (cage.cbf_action_check,
     # cage.opa_action_check, cage.routing_seal) are children of the GFA's
-    # cage.tool_execute span in Langfuse — not orphaned fragments.
+    # cage.tool_execute span in Telemetry — not orphaned fragments.
     carrier = dict(request.headers)
     remote_ctx = otel_extract(carrier)
     token = otel_context.attach(remote_ctx)

@@ -27,12 +27,6 @@ Architecture & Interruption Taxonomy:
     - ESCALATE: Quorum human-in-the-loop (HITL) routing.
     - PAUSE / NARROW: Dedicated execution branches retaining task liveness while
       constraining authorization scope (introduced in v3.1 per design review recommendations).
-
-Phase 4.3: If the external SLM sidecar times out or is unreachable, an
-explicit ``"slm_available": false`` sentinel is injected into the OPA
-payload instead of passing an undefined or zero score.  The Rego policy
-(system_authz.rego) is updated to require higher confidence from other tiers
-when this sentinel is present.
 """
 
 from __future__ import annotations
@@ -79,8 +73,6 @@ try:
     )
 except (ImportError, Exception):
     pass  # prometheus_client not installed or counter already registered
-
-# SLM sidecar has been completely deprecated to optimize latency.
 
 # ---------------------------------------------------------------------------
 # No-Direct-Bind startup assertions
@@ -201,7 +193,7 @@ class GovernanceError(Exception):
 # FRIA Confidence-Starvation Boundary — three-zone enforcement thresholds
 # ---------------------------------------------------------------------------
 # These constants define the three enforcement zones for the adaptive FRIA
-# (Fundamental Rights Impact Assessment) tier (Tier 6b of the governance
+# (Fundamental Rights Impact Assessment) tier (Tier 7 of the governance
 # pipeline).  They are read at module load time and may be overridden via
 # environment variables for staged rollouts or regional tuning.
 #
@@ -1330,11 +1322,17 @@ class SymbolicGovernor:
         data race under concurrent async requests — two simultaneous calls could
         overwrite each other's payload before it was read in ``govern()``.
 
-        Latency optimizations (v2.0.x baseline):
-        - CBF (Redis read) and OPA (HTTP) checks are fully independent and now
-          run concurrently via asyncio.gather, bounding their combined cost to
-          max(CBF_ms, OPA_ms) instead of CBF_ms + OPA_ms.
-        - Each stage is wrapped in a discrete OTel span so Langfuse shows the
+        Execution shape (current):
+        - Checks run in two phases.  Phase 1 is read-only (OPA, Tier-2
+          corroboration, consensus, causal, FRIA); Phase 2 performs mutations
+          (CBF commit, fiscal reservation) only when Phase 1 yields zero
+          violations.
+        - CBF and OPA are NOT run concurrently.  An earlier revision gathered
+          them with ``asyncio.gather`` to bound cost at max(CBF_ms, OPA_ms);
+          that was removed so a CBF commit can never be issued against a plan
+          OPA later rejects.  Combined cost is therefore CBF_ms + OPA_ms.
+          See the phase-ordering note further down this method.
+        - Each stage is wrapped in a discrete OTel span so Telemetry shows the
           full 10-layer pipeline breakdown.
         """
         violations: list[str] = []
@@ -1432,8 +1430,7 @@ class SymbolicGovernor:
 
         # ── POAM-TIER2-001: Tier 2 Confidence Self-Authentication Gap (partially mitigated) ──
         # RISK: The confidence score below is 100% agent-self-reported via params["confidence"].
-        # Since the SLM sidecar was deprecated (latency reduction), no independent verification
-        # mechanism existed to corroborate this value. An adversarial agent could unconditionally
+        # Without independent verification, an adversarial agent could unconditionally
         # report confidence=1.0 to suppress HITL escalation for any action.
         #
         # PARTIAL MITIGATION (deployed): A rule-based structural corroboration heuristic runs
@@ -1452,8 +1449,7 @@ class SymbolicGovernor:
         # ──────────────────────────────────────────────────────────────────────────────────────
 
         # 1. Confidence threshold — local pre-check (fast-fail before network I/O).
-        # The OPA Rego policy (system_authz.rego) also enforces confidence so that
-        # the dynamic SLM-degraded escalation (0.95→0.97) is applied consistently.
+        # The OPA Rego policy (system_authz.rego) also enforces confidence.
         # This local check fires first to avoid unnecessary CBF/OPA round-trips when
         # the confidence score is obviously below threshold.
         with tracer.start_as_current_span("cage.confidence_check") as conf_span:
@@ -1645,8 +1641,7 @@ class SymbolicGovernor:
         # Derive an independent confidence signal from Tier-1 STPA violations and
         # Tier-3 OPA decision margin.  This runs AFTER both tiers have resolved so
         # it can contradict a high self-reported confidence when structural evidence
-        # says otherwise — closing the self-authentication gap without reinstating
-        # the deprecated SLM sidecar.
+        # says otherwise — closing the self-authentication gap deterministically.
         #
         # Conservative treatment: if STPA or OPA results are unavailable (e.g. a tier
         # raised an exception and we have no result at all), treat as structural risk.
@@ -1932,13 +1927,13 @@ class SymbolicGovernor:
         with respect to the static plan and do not need re-evaluation.
 
         Tiers intentionally skipped vs. the full ``govern()`` pipeline:
-          Tier 0: STPA/STAMP UCA validation — deterministic w.r.t. plan structure
-          Tier 1: Agent confidence pre-check — plan was approved at check-time
-          Tier 2 structural corroboration: dependent on STPA/OPA margin, skipped
-          Tier 3: Fiscal Limit Pre-Reservation — already reserved at check-time
+          Tier 0.5: FTRA action classification & reachability
+          Tier 1: STPA/STAMP UCA validation — deterministic w.r.t. plan structure
+          Tier 2: Agent confidence pre-check — plan was approved at check-time
+          Tier 4: Fiscal Limit Pre-Reservation — already reserved at check-time
           Tier 5: Multi-agent consensus — consensus is over the static plan
           Tier 6: DoWhy causal gatekeeper — causal structure is plan-static
-          Tier 6b: FRIA — pre-market document obligation, not per-resume check
+          Tier 7: FRIA — pre-market document obligation, not per-resume check
 
         This avoids paying the full 8-tier cost (including FTRA pre-pipeline gate, multi-model consensus
         and DoWhy causal computation) for a targeted post-approval recheck.
@@ -2031,7 +2026,7 @@ class SymbolicGovernor:
                         opa_span.record_exception(exc)
                         raise
 
-            # Fire CBF and OPA concurrently — same as Tier 3 in the full pipeline.
+            # Fire CBF and OPA concurrently — same as Tiers 3a and 3b in the full pipeline.
             _t_parallel_start = time.perf_counter()
             _gather_results2 = await asyncio.gather(
                 _cbf_revalidate(),
@@ -2196,7 +2191,7 @@ class SymbolicGovernor:
         cbf_allowed = True
         cbf_reason = "SAFE"
         try:
-            cbf_raw = await self.safety_filter.verify_action(tool_name, params)  # type: ignore[misc]  # Protocol declares sync str; impl is async
+            cbf_raw = await self.safety_filter.verify_action(tool_name, params)
             cbf_allowed = not cbf_raw.startswith("UNSAFE") and not cbf_raw.startswith(
                 "["
             )
@@ -2259,7 +2254,7 @@ class SymbolicGovernor:
         Confidence, CBF, OPA, Fiscal Limit Pre-Reservation, Consensus, Causal,
         and FRIA — before issuing the routing seal.
 
-        Previously this method ran only Tier 2 (CBF) and Tier 4 (OPA), which
+        Previously this method ran only Tiers 3a and 3b (CBF and OPA), which
         meant 5 of 7 substantive tiers were bypassed while the seal implied full
         governance approval.  That gap is now closed: the routing seal is issued
         ONLY after ``_run_checks()`` completes successfully across all tiers.
@@ -2438,6 +2433,9 @@ class SymbolicGovernor:
                             defer_token,
                             latency_ms,
                         )
+                        # Extract agent_id from _caller_principal
+                        agent_id = params.get("_caller_principal", "")
+
                         return {
                             "verdict": GovernanceDecision.DEFER,
                             "violations": violations,
@@ -2449,6 +2447,7 @@ class SymbolicGovernor:
                             "defer_token": defer_token,
                             "deferrable": classification_meta.get("deferrable", True),
                             "retry_after_seconds": 300,  # 5 minute default
+                            "agent_id": agent_id,
                         }
 
                     # ── NARROW path (Phase 1.3 — partial-authority/clamped execution) ──
@@ -2503,11 +2502,15 @@ class SymbolicGovernor:
                             constraints_applied,
                             latency_ms,
                         )
+                        # Extract agent_id from _caller_principal
+                        agent_id = params.get("_caller_principal", "")
+
                         return {
                             "verdict": GovernanceDecision.NARROW,
                             "violations": violations,
                             "seal": seal,
                             "latency_ms": latency_ms,
+                            "agent_id": agent_id,
                             "classification_meta": classification_meta,
                             # NARROW-specific fields
                             "original_params": original_params,
@@ -2662,6 +2665,9 @@ class SymbolicGovernor:
                             latency_ms,
                         )
 
+                        # Extract agent_id from _caller_principal
+                        agent_id = params.get("_caller_principal", "")
+
                         return {
                             "verdict": GovernanceDecision.PAUSE,
                             "violations": violations,
@@ -2677,6 +2683,7 @@ class SymbolicGovernor:
                             "retry_after_seconds": estimated_wait,
                             # Audit receipt
                             "pause_receipt": pause_receipt,
+                            "agent_id": agent_id,
                         }
 
                     # ── DENY path (default for hard violations) ────────────────
@@ -2750,11 +2757,15 @@ class SymbolicGovernor:
                     latency_ms,
                 )
 
+                # Extract agent_id from _caller_principal (injected by agent_gateway_adapter)
+                agent_id = params.get("_caller_principal", "")
+
                 return {
                     "verdict": GovernanceDecision.ALLOW,
                     "violations": [],
                     "seal": seal,
                     "latency_ms": latency_ms,
+                    "agent_id": agent_id,
                 }
             except GovernanceError:
                 raise
